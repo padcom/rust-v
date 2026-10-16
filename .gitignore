@@ -1,0 +1,5 @@
+/target
+/third_party
+*.img
+*.qcow2
+.DS_Store
