@@ -11,6 +11,7 @@ repository = "https://github.com/padcom/risc-vm"
 [workspace.dependencies]
 rv-isa = { path = "crates/rv-isa" }
 rv-core = { path = "crates/rv-core" }
+rv-elf = { path = "crates/rv-elf" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

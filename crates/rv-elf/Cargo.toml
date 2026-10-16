@@ -1,0 +1,9 @@
+[package]
+name = "rv-elf"
+description = "Minimal ELF64 loader for RISC-V images"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
