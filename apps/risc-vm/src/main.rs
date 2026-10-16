@@ -28,6 +28,9 @@ struct Args {
     /// Largest supported virtual-memory mode.
     #[arg(long, default_value = "sv48", value_parser = ["sv39", "sv48", "sv57"])]
     mmu: String,
+    /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
+    #[arg(long, value_name = "[HOST:]PORT")]
+    gdb: Option<String>,
     /// Print execution statistics on exit.
     #[arg(long)]
     stats: bool,
@@ -128,7 +131,14 @@ fn run(args: Args) -> Result<Shutdown, String> {
         eprint!("risc-vm: press Ctrl-A x to quit\r\n");
     }
     spawn_console_input(machine.uart.clone(), interactive);
-    let reason = machine.run();
+    let reason = match &args.gdb {
+        Some(addr) => {
+            let addr = if addr.contains(':') { addr.clone() } else { format!("127.0.0.1:{addr}") };
+            let stub = rv_machine::gdb::GdbStub::listen(&addr).map_err(|e| format!("gdb: {addr}: {e}"))?;
+            stub.run(&mut machine).map_err(|e| format!("gdb: {e}"))?
+        }
+        None => machine.run(),
+    };
     let _ = std::io::stdout().flush();
     if args.stats {
         let insns = machine.instructions();

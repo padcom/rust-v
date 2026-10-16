@@ -121,7 +121,14 @@ impl Hart {
     }
 
     /// Executes one instruction, or takes one pending interrupt, bypassing the block cache.
+    /// Does nothing while waiting in WFI with no interrupt pending.
     pub fn step(&mut self) {
+        if self.wfi {
+            if self.shared.mip.load(Ordering::Relaxed) & self.state.csr.mie == 0 {
+                return;
+            }
+            self.wfi = false;
+        }
         if let Some(irq) = self.pending_interrupt() {
             self.wfi = false;
             self.take_trap(irq, 0);

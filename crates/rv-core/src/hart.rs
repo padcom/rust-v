@@ -404,6 +404,15 @@ impl Hart {
         }
     }
 
+    /// Reads a CSR for a debugger, ignoring privilege. `None` if it does not exist.
+    pub fn debug_read_csr(&mut self, csr: u16) -> Option<u64> {
+        // Counter accessibility depends on the current privilege; evaluate as M-mode.
+        let saved = std::mem::replace(&mut self.state.privilege, Priv::Machine);
+        let value = self.csr_read(csr, 0).ok();
+        self.state.privilege = saved;
+        value
+    }
+
     /// Checks privilege and read-only rules for an access to `csr`.
     pub(crate) fn csr_check(&self, csr: u16, write: bool, raw: u32) -> Result<(), Exception> {
         let min_priv = (csr >> 8) & 3;

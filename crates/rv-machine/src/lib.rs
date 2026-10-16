@@ -3,6 +3,7 @@
 
 pub mod clint;
 pub mod fdt;
+pub mod gdb;
 pub mod plic;
 pub mod power;
 pub mod rtc;
@@ -39,7 +40,7 @@ use layout::*;
 pub const ISA_EXTENSIONS: &[&str] = &["i", "m", "a", "c", "zicntr", "zicsr", "zifencei", "zihintpause"];
 
 /// Instructions a hart runs between timer and shutdown checks.
-const SLICE: u64 = 20_000;
+pub const SLICE: u64 = 20_000;
 /// Longest a hart sleeps in WFI before re-checking timers.
 const MAX_IDLE: Duration = Duration::from_millis(10);
 
@@ -213,28 +214,37 @@ impl Machine {
 
     /// Runs until the guest powers off or resets the machine.
     pub fn run(&mut self) -> Shutdown {
-        let hart = &mut self.harts[0];
         loop {
             let started = Instant::now();
-            let exit = hart.run(SLICE);
+            let exit = self.harts[0].run(SLICE);
             self.stats.busy += started.elapsed();
-            self.clint.update_timers();
-            if let Some(reason) = self.power.reason() {
+            if let Some(reason) = self.service(exit) {
                 return reason;
             }
-            if exit == Exit::Wfi {
-                let now = hart.mtime();
-                let deadline = self.clint.mtimecmp(0);
-                if deadline > now {
-                    let ticks = deadline - now;
-                    let wait =
-                        Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / TIMEBASE_HZ)).min(MAX_IDLE);
-                    let started = Instant::now();
-                    hart.shared.wait(wait);
-                    self.stats.idle += started.elapsed();
-                }
-                self.clint.update_timers();
-            }
         }
+    }
+
+    /// Housekeeping between slices of guest execution: timers, shutdown requests and idling
+    /// in WFI (for at most `MAX_IDLE`).
+    pub fn service(&mut self, exit: Exit) -> Option<Shutdown> {
+        self.clint.update_timers();
+        if let Some(reason) = self.power.reason() {
+            return Some(reason);
+        }
+        if exit == Exit::Wfi {
+            let hart = &self.harts[0];
+            let now = hart.mtime();
+            let deadline = self.clint.mtimecmp(0);
+            if deadline > now {
+                let ticks = deadline - now;
+                let wait =
+                    Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / TIMEBASE_HZ)).min(MAX_IDLE);
+                let started = Instant::now();
+                hart.shared.wait(wait);
+                self.stats.idle += started.elapsed();
+            }
+            self.clint.update_timers();
+        }
+        None
     }
 }
