@@ -52,8 +52,9 @@ struct Args {
     /// Interpretations of a block before the JIT compiles it.
     #[arg(long, default_value_t = 16, hide = true)]
     jit_threshold: u32,
-    /// Attach a raw disk image as a virtio-blk drive; append `,ro` for read-only. Repeatable.
-    #[arg(long, value_name = "PATH[,ro]")]
+    /// Attach a raw disk image as a virtio-blk drive (repeatable). Options: `,ro` for read-only,
+    /// `,snapshot` to keep writes in memory and leave the image unchanged.
+    #[arg(long, value_name = "PATH[,ro][,snapshot]")]
     disk: Vec<String>,
     /// Do not add a network card.
     #[arg(long)]
@@ -156,17 +157,28 @@ fn spawn_console_input(uart: Arc<rv_machine::uart::Uart>, raw: bool) {
 }
 
 fn open_disk(spec: &str) -> Result<rv_machine::Drive, String> {
-    let (path, read_only) = match spec.strip_suffix(",ro") {
-        Some(path) => (path, true),
-        None => (spec, false),
-    };
+    let mut parts = spec.split(',');
+    let path = parts.next().unwrap_or_default();
+    let (mut read_only, mut snapshot) = (false, false);
+    for option in parts {
+        match option {
+            "ro" => read_only = true,
+            "snapshot" => snapshot = true,
+            _ => return Err(format!("{spec}: unknown disk option `{option}` (use ro or snapshot)")),
+        }
+    }
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .write(!read_only)
+        .write(!read_only && !snapshot)
         .open(path)
         .map_err(|e| format!("{path}: {e}"))?;
-    let backend = rv_machine::virtio::blk::FileBackend::new(file).map_err(|e| format!("{path}: {e}"))?;
-    Ok(rv_machine::Drive { backend: Box::new(backend), read_only })
+    let file = rv_machine::virtio::blk::FileBackend::new(file).map_err(|e| format!("{path}: {e}"))?;
+    let backend: Box<dyn rv_machine::virtio::blk::Backend> = if snapshot {
+        Box::new(rv_machine::virtio::blk::Overlay::new(Box::new(file)))
+    } else {
+        Box::new(file)
+    };
+    Ok(rv_machine::Drive { backend, read_only })
 }
 
 fn run(args: Args) -> Result<Shutdown, String> {

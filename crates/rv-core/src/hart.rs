@@ -536,10 +536,12 @@ impl Hart {
                 if !self.counter_accessible(csr - csr::CYCLE) {
                     return Err(Exception::illegal(raw));
                 }
+                // Compiled code adds what it retired when it returns to the dispatcher.
+                let pending = self.state.jit.retired;
                 match csr {
-                    csr::CYCLE => c.mcycle,
+                    csr::CYCLE => c.mcycle.wrapping_add(pending),
                     csr::TIME => self.mtime(),
-                    csr::INSTRET => c.minstret,
+                    csr::INSTRET => c.minstret.wrapping_add(pending),
                     _ => 0,
                 }
             }
@@ -592,8 +594,8 @@ impl Hart {
             // ("none"). Software (and riscv-tests) probe these rather than expecting a trap.
             csr::TSELECT | csr::TDATA1 | csr::TDATA2 | csr::TDATA3 => 0,
             csr::TINFO => 1,
-            csr::MCYCLE => c.mcycle,
-            csr::MINSTRET => c.minstret,
+            csr::MCYCLE => c.mcycle.wrapping_add(self.state.jit.retired),
+            csr::MINSTRET => c.minstret.wrapping_add(self.state.jit.retired),
             csr::MHPMCOUNTER3..=csr::MHPMCOUNTER31 => 0,
             _ => return Err(Exception::illegal(raw)),
         })
@@ -686,9 +688,10 @@ impl Hart {
             csr::PMPADDR0..=csr::PMPADDR63 => {
                 c.pmpaddr[(csr - csr::PMPADDR0) as usize] = value & ((1 << 54) - 1);
             }
-            csr::MCYCLE => c.mcycle = value,
+            // Inside compiled code, the retirements it has not reported yet are added later.
+            csr::MCYCLE => c.mcycle = value.wrapping_sub(self.state.jit.retired),
             csr::MINSTRET => {
-                c.minstret = value;
+                c.minstret = value.wrapping_sub(self.state.jit.retired);
                 self.suppress_instret = true;
             }
             // Read-only zero or writes ignored.

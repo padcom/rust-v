@@ -309,12 +309,15 @@ impl Compiler {
         let data_priv = info.data_priv;
         // Instructions the translator does not handle natively run through the interpreter
         // helper, as long as they cannot change control flow, privilege or translation.
-        let count = insns
-            .iter()
-            .take_while(|i| {
-                supported(i.op) || (i.op != Op::Illegal && rv_core::jit::executable_by_helper(i.op))
-            })
-            .count();
+        let mut count =
+            insns.iter().take_while(|i| supported(i.op) || rv_core::jit::executable_by_helper(i)).count();
+        // A final instruction that ends the block and has no native translation (a privileged
+        // one such as a CSR write, ECALL or SRET) also runs through the helper, after which
+        // the block returns to the dispatcher.
+        let helper_terminator = insns.get(count).is_some_and(|i| i.op != Op::Illegal && !supported(i.op));
+        if helper_terminator {
+            count += 1;
+        }
         if count == 0 {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
             return Compiled::Unsupported;
@@ -357,6 +360,7 @@ impl Compiler {
             data_priv,
             pc0: state, // replaced below
             dirty: 0,
+            flushed: 0,
             block_sig_ref,
             slot_addr,
             page_generation: info.page_generation as i64,
@@ -370,7 +374,15 @@ impl Compiler {
         let mut offset = 0i64;
         let mut ended = false;
         for (i, insn) in insns.iter().enumerate() {
-            ended = t.translate(insn, i as u64, offset);
+            ended = if helper_terminator && i == insns.len() - 1 {
+                t.exec_via_helper(insn, i as u64, offset);
+                // The helper left the next pc (or a trap target) in the hart state.
+                let pc = t.b.ins().load(I64, t.trusted, t.state, abi::PC as i32);
+                t.exit(pc, i as u64 + 1, 0);
+                true
+            } else {
+                t.translate(insn, i as u64, offset)
+            };
             offset += insn.len as i64;
         }
         if !ended {
@@ -488,6 +500,9 @@ struct Translator<'a> {
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
+    /// Instructions of this block already added to the retired count (before helper calls,
+    /// so that the interpreter sees exact counters).
+    flushed: u64,
     block_sig_ref: SigRef,
     /// Addresses of this block's two chain slots.
     slot_addr: [i64; 2],
@@ -538,8 +553,15 @@ impl Translator<'_> {
             }
         }
         self.b.ins().store(self.trusted, pc, self.state, abi::PC as i32);
+        self.add_retired(retired - self.flushed);
+    }
+
+    fn add_retired(&mut self, n: u64) {
+        if n == 0 {
+            return;
+        }
         let total = self.b.ins().load(I64, self.trusted, self.state, abi::JIT_RETIRED as i32);
-        let total = self.b.ins().iadd_imm_s(total, retired as i64);
+        let total = self.b.ins().iadd_imm_s(total, n as i64);
         self.b.ins().store(self.trusted, total, self.state, abi::JIT_RETIRED as i32);
     }
 
@@ -696,6 +718,9 @@ impl Translator<'_> {
         }
         // The cached values now match HartState.
         self.dirty = 0;
+        // Counters read or written by the helper must include the instructions before it.
+        self.add_retired(index - self.flushed);
+        self.flushed = index;
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         self.b.ins().store(t, pc, self.state, abi::PC as i32);
         // SAFETY: `Insn` is plain data of exactly 16 bytes.

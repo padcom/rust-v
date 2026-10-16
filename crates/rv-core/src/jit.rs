@@ -208,10 +208,10 @@ pub unsafe extern "C" fn jit_load(hart: *mut Hart, addr: u64, size: u64, out: *m
     }
 }
 
-/// Whether compiled code may run `op` by calling [`jit_exec`]: anything that cannot change
-/// control flow, privilege or address translation (those end blocks).
-pub fn executable_by_helper(op: rv_isa::Op) -> bool {
-    !crate::block::ends_block(op)
+/// Whether compiled code may run `insn` by calling [`jit_exec`] and carry on: anything that
+/// cannot change control flow, privilege or address translation (those end blocks).
+pub fn executable_by_helper(insn: &Insn) -> bool {
+    insn.op != rv_isa::Op::Illegal && !crate::block::ends_block_at(insn)
 }
 
 /// Executes one instruction with the interpreter, for compiled code. The instruction is
@@ -224,7 +224,13 @@ pub unsafe extern "C" fn jit_exec(hart: *mut Hart, lo: u64, hi: u64) -> u64 {
     // SAFETY: by contract; `Insn` is plain data of exactly 16 bytes.
     let (hart, insn) = unsafe { (&mut *hart, std::mem::transmute::<[u64; 2], Insn>([lo, hi])) };
     match hart.execute(&insn) {
-        Ok(()) => 0,
+        Ok(()) => {
+            // The block's exit counts this instruction; a write to minstret must not be.
+            if std::mem::take(&mut hart.suppress_instret) {
+                hart.state.csr.minstret = hart.state.csr.minstret.wrapping_sub(1);
+            }
+            0
+        }
         Err(e) => {
             hart.jit_exception = Some(e);
             1
@@ -260,7 +266,7 @@ impl Hart {
         // SAFETY: the compiled code only touches `HartState` through the pointer and the rest
         // of the hart through the helpers above.
         let result = unsafe { entry(&mut *(*hart).state, hart, code) };
-        let retired = self.state.jit.retired;
+        let retired = std::mem::take(&mut self.state.jit.retired);
         self.state.csr.minstret = self.state.csr.minstret.wrapping_add(retired);
         self.state.csr.mcycle = self.state.csr.mcycle.wrapping_add(retired);
         if result & EXCEPTION != 0 {

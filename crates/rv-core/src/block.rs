@@ -16,8 +16,10 @@ use crate::jit::JitCode;
 use crate::mem::{PAGE_SIZE, host_load};
 
 pub(crate) const MAX_BLOCK_INSNS: usize = 64;
-/// The cache is simply dropped when it grows past this many blocks.
-const MAX_BLOCKS: usize = 1 << 16;
+/// The cache is simply dropped when it grows past this many blocks. A desktop distribution
+/// touches millions of blocks while booting, so this must be large enough to hold the working
+/// set, or hot blocks lose their compiled code and get recompiled over and over.
+const MAX_BLOCKS: usize = 1 << 19;
 
 pub(crate) struct Block {
     pub insns: Box<[Insn]>,
@@ -136,7 +138,27 @@ impl BlockCache {
     }
 }
 
-/// Whether execution must leave the block after `op`.
+/// Whether execution must leave the block after `insn`. CSR accesses that cannot change
+/// privilege, translation or interrupt state (see [`benign_csr`]) do not end it.
+pub fn ends_block_at(insn: &Insn) -> bool {
+    ends_block(insn.op) && !benign_csr(insn)
+}
+
+/// CSR accesses that only read, or that write the floating-point and vector status CSRs.
+/// Executing them in the middle of a block is safe for both the interpreter and compiled code.
+pub fn benign_csr(insn: &Insn) -> bool {
+    use crate::csr;
+    match insn.op {
+        // CSRRS/CSRRC with x0 (or a zero immediate) do not write.
+        Op::Csrrs | Op::Csrrc | Op::Csrrsi | Op::Csrrci if insn.rs1 == 0 => true,
+        Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci => {
+            matches!(insn.csr(), csr::FFLAGS | csr::FRM | csr::FCSR | csr::VXSAT | csr::VXRM | csr::VCSR)
+        }
+        _ => false,
+    }
+}
+
+/// Whether execution must leave the block after `op`, whatever its operands.
 pub fn ends_block(op: Op) -> bool {
     matches!(
         op,
@@ -192,7 +214,7 @@ pub(crate) unsafe fn decode_block(start: *const u8) -> Vec<Insn> {
         let insn = decode(raw);
         off += insn.len as usize;
         insns.push(insn);
-        if ends_block(insn.op) {
+        if ends_block_at(&insn) {
             break;
         }
     }

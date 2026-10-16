@@ -126,6 +126,82 @@ impl Backend for Vec<u8> {
     }
 }
 
+/// Copy-on-write layer over another backend: writes stay in host memory and are discarded
+/// with the device, so the image underneath is never modified.
+pub struct Overlay {
+    base: Box<dyn Backend>,
+    blocks: std::collections::HashMap<u64, Box<[u8; OVERLAY_BLOCK]>>,
+}
+
+const OVERLAY_BLOCK: usize = 4096;
+
+impl Overlay {
+    pub fn new(base: Box<dyn Backend>) -> Self {
+        Overlay { base, blocks: std::collections::HashMap::new() }
+    }
+
+    /// Splits `offset..offset + len` into (block, offset in block, length) pieces.
+    fn pieces(offset: u64, len: usize) -> impl Iterator<Item = (u64, usize, usize)> {
+        let mut pos = offset;
+        let end = offset + len as u64;
+        std::iter::from_fn(move || {
+            (pos < end).then(|| {
+                let block = pos / OVERLAY_BLOCK as u64;
+                let at = (pos % OVERLAY_BLOCK as u64) as usize;
+                let n = (OVERLAY_BLOCK - at).min((end - pos) as usize);
+                pos += n as u64;
+                (block, at, n)
+            })
+        })
+    }
+}
+
+impl Backend for Overlay {
+    fn size(&self) -> u64 {
+        self.base.size()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
+        if self.blocks.is_empty() {
+            return self.base.read_at(offset, buf);
+        }
+        let mut done = 0;
+        for (block, at, n) in Self::pieces(offset, buf.len()) {
+            match self.blocks.get(&block) {
+                Some(data) => buf[done..done + n].copy_from_slice(&data[at..at + n]),
+                None => self.base.read_at(offset + done as u64, &mut buf[done..done + n])?,
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
+    fn write_at(&mut self, offset: u64, data: &[u8]) -> io::Result<()> {
+        if offset + data.len() as u64 > self.size() {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        let mut done = 0;
+        for (block, at, n) in Self::pieces(offset, data.len()) {
+            if !self.blocks.contains_key(&block) {
+                let mut fresh = Box::new([0u8; OVERLAY_BLOCK]);
+                if n < OVERLAY_BLOCK {
+                    let start = block * OVERLAY_BLOCK as u64;
+                    let len = (self.size() - start).min(OVERLAY_BLOCK as u64) as usize;
+                    self.base.read_at(start, &mut fresh[..len])?;
+                }
+                self.blocks.insert(block, fresh);
+            }
+            self.blocks.get_mut(&block).unwrap()[at..at + n].copy_from_slice(&data[done..done + n]);
+            done += n;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub struct Blk {
     backend: Mutex<Box<dyn Backend>>,
     read_only: bool,
@@ -256,5 +332,29 @@ impl VirtioDevice for Blk {
 
     fn pci_class(&self) -> u32 {
         0x01_00_00
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_keeps_the_base_unchanged() {
+        let base: Vec<u8> = (0..3 * OVERLAY_BLOCK + 100).map(|i| i as u8).collect();
+        let mut overlay = Overlay::new(Box::new(base.clone()));
+        overlay.write_at(4000, &[0xaa; 200]).unwrap();
+        let mut all = vec![0u8; base.len()];
+        overlay.read_at(0, &mut all).unwrap();
+        let mut expected = base.clone();
+        expected[4000..4200].fill(0xaa);
+        assert_eq!(all, expected);
+        let mut tail = [0u8; 50];
+        overlay.read_at(base.len() as u64 - 50, &mut tail).unwrap();
+        assert_eq!(&tail[..], &base[base.len() - 50..]);
+        assert!(overlay.write_at(base.len() as u64 - 10, &[0; 20]).is_err());
+        overlay.write_at(base.len() as u64 - 10, &[1; 10]).unwrap();
+        overlay.read_at(base.len() as u64 - 10, &mut tail[..10]).unwrap();
+        assert_eq!(&tail[..10], &[1; 10]);
     }
 }
