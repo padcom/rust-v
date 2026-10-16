@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "apps/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ repository = "https://github.com/padcom/risc-vm"
 rv-isa = { path = "crates/rv-isa" }
 rv-core = { path = "crates/rv-core" }
 rv-elf = { path = "crates/rv-elf" }
+rv-machine = { path = "crates/rv-machine" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

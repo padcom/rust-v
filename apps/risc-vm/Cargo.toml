@@ -1,0 +1,14 @@
+[package]
+name = "risc-vm"
+description = "RISC-V RVA23 system emulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+crossterm = { version = "0.29.0", default-features = false }
+rv-machine.workspace = true
+
+[lints]
+workspace = true

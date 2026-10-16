@@ -462,7 +462,8 @@ impl Hart {
             }
             csr::PMPADDR0..=csr::PMPADDR63 => c.pmpaddr[(csr - csr::PMPADDR0) as usize],
             csr::MSECCFG => 0,
-            // A single trigger slot of type 0 ("none"), i.e. no usable triggers.
+            // Sdtrig with no usable triggers: tselect is hard-wired to 0 and the slot has type 0
+            // ("none"). Software (and riscv-tests) probe these rather than expecting a trap.
             csr::TSELECT | csr::TDATA1 | csr::TDATA2 | csr::TDATA3 => 0,
             csr::TINFO => 1,
             csr::MCYCLE => c.mcycle,

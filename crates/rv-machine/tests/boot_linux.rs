@@ -1,0 +1,80 @@
+//! Boots OpenSBI + Linux + the bring-up initramfs built by `scripts/build-guest-images.sh`.
+//!
+//! Ignored by default because it needs the guest images:
+//! `cargo test -p rv-machine --release -- --ignored boot_linux`
+
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rv_machine::{Machine, MachineConfig, Shutdown};
+
+/// Console sink that the test can inspect while the machine runs.
+#[derive(Clone, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Capture {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+
+    /// Waits until the console output contains `needle` after byte offset `from`.
+    fn wait_for(&self, needle: &str, from: usize, timeout: Duration) -> usize {
+        let start = Instant::now();
+        loop {
+            let text = self.text();
+            if let Some(pos) = text.get(from..).and_then(|t| t.find(needle)) {
+                return from + pos + needle.len();
+            }
+            assert!(start.elapsed() < timeout, "timed out waiting for {needle:?}; console:\n{text}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+fn image(name: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/guest").join(name);
+    std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("{}: {e} (run scripts/build-guest-images.sh)", path.display()))
+}
+
+#[test]
+#[ignore = "needs scripts/build-guest-images.sh"]
+fn boot_linux() {
+    let console = Capture::default();
+    let config = MachineConfig {
+        bios: image("fw_dynamic.bin"),
+        kernel: Some(image("Image")),
+        initrd: Some(image("initramfs.cpio")),
+        ..MachineConfig::default()
+    };
+    let mut machine = Machine::new(config, Box::new(console.clone())).unwrap();
+    let uart = machine.uart.clone();
+    let runner = std::thread::spawn(move || machine.run());
+
+    let timeout = Duration::from_secs(120);
+    let mut pos = console.wait_for("OpenSBI v", 0, timeout);
+    pos = console.wait_for("Linux version", pos, timeout);
+    pos = console.wait_for("risc-vm init:", pos, timeout);
+    pos = console.wait_for("# ", pos, timeout);
+
+    uart.push_input(b"echo hello from the guest\n");
+    pos = console.wait_for("hello from the guest\r\n", pos, timeout);
+    uart.push_input(b"cpuinfo\n");
+    pos = console.wait_for("rv64imac", pos, timeout);
+    uart.push_input(b"poweroff\n");
+    console.wait_for("reboot: Power down", pos, timeout);
+
+    assert_eq!(runner.join().unwrap(), Shutdown::PowerOff);
+}
