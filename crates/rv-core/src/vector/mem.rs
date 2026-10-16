@@ -4,6 +4,8 @@ use rv_isa::{Insn, Op};
 
 use super::{group_len, mask};
 use crate::hart::Hart;
+use crate::mem::{PAGE_SIZE, host_read_bytes, host_write_bytes};
+use crate::mmu::Access;
 use crate::trap::Exception;
 
 #[inline(always)]
@@ -108,7 +110,46 @@ impl Hart {
         fault_only_first: bool,
     ) -> Result<(), Exception> {
         let (nf, field_regs) = fields;
-        let start = self.state.csr.vstart as usize;
+        let mut start = self.state.csr.vstart as usize;
+        if mode == Mode::Unit && nf == 1 && vm {
+            // Contiguous and unmasked: copy a page at a time between RAM and the register group.
+            // Whatever is left (MMIO, an element straddling pages, stores to code pages) goes
+            // through the element loop below.
+            let access = if store { Access::Store } else { Access::Load };
+            let p = self.data_priv();
+            let vlenb = self.vlenb();
+            while start < evl {
+                let addr = self.mask_pointer(base.wrapping_add((start * eew) as u64), p);
+                let room = (PAGE_SIZE - (addr & (PAGE_SIZE - 1))) as usize;
+                let n = (room / eew).min(evl - start);
+                if n == 0 {
+                    break;
+                }
+                let host = match self.data_page_ptr(addr, access, p) {
+                    Ok(Some(host)) => host,
+                    Ok(None) => break,
+                    Err(e) => {
+                        if fault_only_first && start > 0 {
+                            self.state.csr.vl = start as u64;
+                            return Ok(());
+                        }
+                        self.state.csr.vstart = start as u64;
+                        return Err(e);
+                    }
+                };
+                let off = vd as usize * vlenb + start * eew;
+                let regs = &mut self.state.v[off..off + n * eew];
+                // SAFETY: the TLB maps whole pages of RAM, and `n` elements fit in this one.
+                unsafe {
+                    if store {
+                        host_write_bytes(host, regs);
+                    } else {
+                        host_read_bytes(host, regs);
+                    }
+                }
+                start += n;
+            }
+        }
         for i in start..evl {
             if !self.vactive(vm, i) {
                 continue;

@@ -319,6 +319,23 @@ impl Hart {
         }
     }
 
+    /// Host pointer for a data access at `vaddr` (already pointer-masked) whose page is RAM
+    /// that the TLB maps or can map, for bulk copies. `None` for MMIO, and for stores to pages
+    /// holding cached code, which must go through [`Hart::store`].
+    pub(crate) fn data_page_ptr(
+        &mut self,
+        vaddr: u64,
+        access: Access,
+        p: Priv,
+    ) -> Result<Option<*mut u8>, Exception> {
+        if let Some(host) = self.tlb_lookup(p, access, vaddr) {
+            return Ok(Some(host));
+        }
+        let paddr = self.translate(vaddr, access, p)?;
+        self.tlb_fill(p, access, vaddr, paddr);
+        Ok(self.tlb_lookup(p, access, vaddr))
+    }
+
     /// Host pointer to the instruction parcel at `vaddr`, checking execute permission.
     /// The rest of the page is executable too.
     #[inline]

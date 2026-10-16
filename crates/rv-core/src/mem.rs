@@ -63,6 +63,48 @@ pub unsafe fn host_store(ptr: *mut u8, size: u8, value: u64) {
     }
 }
 
+/// Copies `out.len()` bytes from host memory at `src`, eight bytes per access where aligned.
+///
+/// # Safety
+/// As for [`host_load`], for the whole range.
+pub unsafe fn host_read_bytes(src: *const u8, out: &mut [u8]) {
+    let mut i = 0;
+    while i < out.len() {
+        // SAFETY: in range by contract.
+        let p = unsafe { src.add(i) };
+        if (p as usize).is_multiple_of(8) && out.len() - i >= 8 {
+            // SAFETY: as above.
+            out[i..i + 8].copy_from_slice(&unsafe { host_load(p, 8) }.to_le_bytes());
+            i += 8;
+        } else {
+            // SAFETY: as above.
+            out[i] = unsafe { host_load(p, 1) } as u8;
+            i += 1;
+        }
+    }
+}
+
+/// Copies `data` to host memory at `dst`, eight bytes per access where aligned.
+///
+/// # Safety
+/// As for [`host_store`], for the whole range.
+pub unsafe fn host_write_bytes(dst: *mut u8, data: &[u8]) {
+    let mut i = 0;
+    while i < data.len() {
+        // SAFETY: in range by contract.
+        let p = unsafe { dst.add(i) };
+        if (p as usize).is_multiple_of(8) && data.len() - i >= 8 {
+            // SAFETY: as above.
+            unsafe { host_store(p, 8, u64::from_le_bytes(data[i..i + 8].try_into().unwrap())) };
+            i += 8;
+        } else {
+            // SAFETY: as above.
+            unsafe { host_store(p, 1, data[i] as u64) };
+            i += 1;
+        }
+    }
+}
+
 /// A contiguous block of guest physical RAM.
 pub struct GuestRam {
     ptr: NonNull<u8>,
@@ -113,40 +155,18 @@ impl GuestRam {
         unsafe { host_store(self.host_ptr(offset), size, value) }
     }
 
-    /// Copies `data` into RAM at `offset`. Bulk copies move eight bytes per atomic access.
+    /// Copies `data` into RAM at `offset`.
     pub fn write_bytes(&self, offset: u64, data: &[u8]) {
         self.check(offset, data.len() as u64);
-        let mut i = 0;
-        while i < data.len() {
-            let addr = offset + i as u64;
-            let rest = data.len() - i;
-            let n = if addr.is_multiple_of(8) && rest >= 8 { 8 } else { 1 };
-            let value =
-                if n == 8 { u64::from_le_bytes(data[i..i + 8].try_into().unwrap()) } else { data[i] as u64 };
-            // SAFETY: bounds checked above.
-            unsafe { host_store(self.host_ptr(addr), n as u8, value) }
-            i += n;
-        }
+        // SAFETY: bounds checked above.
+        unsafe { host_write_bytes(self.host_ptr(offset), data) }
     }
 
-    /// Copies RAM at `offset` into `out`. Bulk copies move eight bytes per atomic access.
+    /// Copies RAM at `offset` into `out`.
     pub fn read_bytes(&self, offset: u64, out: &mut [u8]) {
         self.check(offset, out.len() as u64);
-        let mut i = 0;
-        while i < out.len() {
-            let addr = offset + i as u64;
-            let rest = out.len() - i;
-            if addr.is_multiple_of(8) && rest >= 8 {
-                // SAFETY: bounds checked above.
-                let v = unsafe { host_load(self.host_ptr(addr), 8) };
-                out[i..i + 8].copy_from_slice(&v.to_le_bytes());
-                i += 8;
-            } else {
-                // SAFETY: bounds checked above.
-                out[i] = unsafe { host_load(self.host_ptr(addr), 1) } as u8;
-                i += 1;
-            }
-        }
+        // SAFETY: bounds checked above.
+        unsafe { host_read_bytes(self.host_ptr(offset), out) }
     }
 }
 

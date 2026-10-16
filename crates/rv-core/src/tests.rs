@@ -197,3 +197,32 @@ fn vfrec7_register_group() {
     let got: Vec<u64> = (8..12).map(|i| hart.velem(4, i, 2)).collect();
     assert_eq!(got, [0x2950, 0x7bff, 0x7e00, 0x7bff]);
 }
+
+#[test]
+fn unit_stride_vector_access_across_a_fault() {
+    let (mut hart, _) = hart();
+    hart.state.csr.mstatus |= status::VS;
+    // 0x4000_0000 is mapped, the page after it is not.
+    let va = 0x4000_0000;
+    map_page(&mut hart, va, ((RAM + 0x5_0000) >> 12) << 10 | LEAF_RWAD);
+    hart.state.privilege = Priv::Supervisor;
+    for i in 0..32 {
+        hart.bus.write(RAM + 0x5_0fe0 + i, 1, 0x40 + i);
+    }
+    // e8, m8: 64 elements, the last 32 of which are on the unmapped page.
+    hart.state.csr.vtype = 3;
+    hart.state.csr.vl = 64;
+    hart.state.x[10] = va + 0xfe0;
+    let vle8 = rv_isa::decode(0x0205_0407); // vle8.v v8, (a0)
+    let err = hart.execute(&vle8).unwrap_err();
+    assert_eq!(err.cause, cause::LOAD_PAGE_FAULT);
+    assert_eq!(err.tval, va + 0x1000);
+    assert_eq!(hart.state.csr.vstart, 32, "resumes at the first element of the unmapped page");
+    let loaded: Vec<u64> = (0..32).map(|i| hart.velem(8, i, 1)).collect();
+    assert_eq!(loaded, (0x40..0x60).collect::<Vec<_>>());
+
+    hart.state.csr.vstart = 0;
+    let vle8ff = rv_isa::decode(0x0305_0407); // vle8ff.v v8, (a0)
+    hart.execute(&vle8ff).unwrap();
+    assert_eq!(hart.state.csr.vl, 32, "fault-only-first trims vl");
+}
