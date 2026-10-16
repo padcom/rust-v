@@ -79,7 +79,7 @@ fn boot(jit: bool) {
     let timeout = Duration::from_secs(120);
     let mut pos = console.wait_for("OpenSBI v", 0, timeout);
     pos = console.wait_for("Linux version", pos, timeout);
-    pos = console.wait_for("risc-vm: busybox userland ready", pos, timeout);
+    pos = console.wait_for("rust-v: busybox userland ready", pos, timeout);
     pos = console.wait_for("# ", pos, timeout);
 
     uart.push_input(b"echo hello from the guest\n");

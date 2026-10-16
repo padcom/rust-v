@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds a bare-metal CoreMark image for the risc-vm board into third_party/bench/coremark.bin.
-# Run it as firmware: risc-vm --bios third_party/bench/coremark.bin
+# Builds a bare-metal CoreMark image for the rust-v board into third_party/bench/coremark.bin.
+# Run it as firmware: rust-v --bios third_party/bench/coremark.bin
 # Usage: scripts/build-coremark.sh [ITERATIONS]
 set -euo pipefail
 

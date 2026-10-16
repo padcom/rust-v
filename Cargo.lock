@@ -551,7 +551,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "risc-vm"
+name = "rust-v"
 version = "0.1.0"
 dependencies = [
  "clap",

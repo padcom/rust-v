@@ -1,5 +1,5 @@
 [package]
-name = "risc-vm"
+name = "rust-v"
 description = "RISC-V RVA23 system emulator"
 version.workspace = true
 edition.workspace = true

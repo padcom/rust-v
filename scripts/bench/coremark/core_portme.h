@@ -1,4 +1,4 @@
-/* CoreMark port for the risc-vm board: bare metal, M-mode, no FPU, UART console. */
+/* CoreMark port for the rust-v board: bare metal, M-mode, no FPU, UART console. */
 #ifndef CORE_PORTME_H
 #define CORE_PORTME_H
 

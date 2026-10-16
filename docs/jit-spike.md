@@ -1,7 +1,7 @@
 # Phase 2.5: JIT spike report
 
 **Date:** 2026-10-16. **Host:** Apple M-series (arm64), macOS 26. **Code:** `crates/rv-jit`,
-`crates/rv-core/src/jit.rs`, enabled with `risc-vm --jit`.
+`crates/rv-core/src/jit.rs`, enabled with `rust-v --jit`.
 
 ## What was built
 

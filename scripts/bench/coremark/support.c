@@ -1,4 +1,4 @@
-/* Board support for CoreMark on risc-vm. */
+/* Board support for CoreMark on rust-v. */
 #include <stddef.h>
 
 void uart_send_char(char c) { *(volatile unsigned char *)0x10000000 = c; }

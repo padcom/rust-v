@@ -6,7 +6,7 @@ members = ["crates/*", "apps/*"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/padcom/risc-vm"
+repository = "https://github.com/padcom/rust-v"
 
 [workspace.dependencies]
 rv-isa = { path = "crates/rv-isa" }

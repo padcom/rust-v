@@ -199,14 +199,14 @@ impl GdbStub {
     /// Listens on `addr` and blocks until GDB connects.
     pub fn listen(addr: impl ToSocketAddrs) -> io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
-        eprint!("risc-vm: waiting for gdb on {}\r\n", listener.local_addr()?);
+        eprint!("rust-v: waiting for gdb on {}\r\n", listener.local_addr()?);
         Self::accept(&listener)
     }
 
     /// Blocks until GDB connects to `listener`.
     pub fn accept(listener: &TcpListener) -> io::Result<Self> {
         let (stream, peer) = listener.accept()?;
-        eprint!("risc-vm: gdb connected from {peer}\r\n");
+        eprint!("rust-v: gdb connected from {peer}\r\n");
         stream.set_nodelay(true)?;
         let conn = Connection { reader: BufReader::new(stream.try_clone()?), writer: stream, no_ack: false };
         Ok(GdbStub { conn, breakpoints: BTreeSet::new() })

@@ -1,4 +1,4 @@
-# risc-vm
+# rust-v
 
 A cross-platform RISC-V system emulator, aiming at a 4-core RVA23 machine that runs Ubuntu
 Desktop. See [PLAN.md](PLAN.md) for the roadmap and current status.
@@ -20,7 +20,7 @@ Debian container, so you need `podman` or `docker`:
 scripts/build-guest-images.sh        # writes third_party/guest/{fw_dynamic.bin,Image,initramfs.cpio}
 
 G=third_party/guest
-target/release/risc-vm --bios $G/fw_dynamic.bin --kernel $G/Image --initrd $G/initramfs.cpio
+target/release/rust-v --bios $G/fw_dynamic.bin --kernel $G/Image --initrd $G/initramfs.cpio
 ```
 
 Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful options:
@@ -64,4 +64,4 @@ cargo test --release -p rv-conformance -- --ignored vector_tests
 | `rv-jit` | Cranelift-based block compiler |
 | `rv-conformance` | riscv-tests runner for interpreter and JIT |
 | `rv-machine` | the board: CLINT, PLIC, UART, RTC, power control, device tree, GDB stub |
-| `risc-vm` | command-line front end |
+| `rust-v` | command-line front end |

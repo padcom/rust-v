@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::Relaxed};
 
 #[cfg(not(target_endian = "little"))]
-compile_error!("risc-vm requires a little-endian host");
+compile_error!("rust-v requires a little-endian host");
 
 pub const PAGE_SIZE: u64 = 4096;
 pub const PAGE_SHIFT: u32 = 12;

@@ -30,7 +30,7 @@ mkdir -p "$ROOT/third_party/vector-tests"
 
   cd $D/riscv-vector-tests
   # Debian'"'"'s cross compiler lacks the bfloat16 extensions, so drop those test configurations.
-  # Vector crypto tests are still built; the test runner skips what risc-vm does not implement.
+  # Vector crypto tests are still built; the test runner skips what rust-v does not implement.
   rm -f configs/*bf16*
   : > Makefrag  # placeholder so that the Makefile can include it; generate-stage1 rewrites it
   ARGS="VLEN=$VLEN XLEN=64 MODE=machine RISCV=$D/spike RISCV_PREFIX=riscv64-unknown-elf-

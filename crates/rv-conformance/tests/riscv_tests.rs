@@ -137,7 +137,7 @@ fn run_suite(jit: bool) {
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
-/// Extensions the generated vector tests cover that risc-vm does not implement (vector crypto,
+/// Extensions the generated vector tests cover that rust-v does not implement (vector crypto,
 /// Zvbc and bfloat16), as test-name prefixes.
 const VECTOR_UNSUPPORTED: &[&str] = &[
     "vaes",

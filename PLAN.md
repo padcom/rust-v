@@ -1,4 +1,4 @@
-# risc-vm — RVA23 system emulator: project plan
+# rust-v — RVA23 system emulator: project plan
 
 Goal: a cross-platform (macOS / Linux / Windows; x86-64 and AArch64 hosts) emulator
 of a 4-core RISC-V RVA23 machine that boots the latest Ubuntu Desktop (RISC-V) and
@@ -104,7 +104,7 @@ extensions, so *all of them* must work before Ubuntu userland will run:
 ## 2. Project structure (Cargo workspace)
 
 ```
-risc-vm/
+rust-v/
   crates/
     rv-isa/        decoder, instruction definitions, disassembler (shared by interp + JIT)
     rv-core/       hart state, CSRs, privilege/trap logic, MMU (Sv39/48/57), interpreter
@@ -115,7 +115,7 @@ risc-vm/
     rv-frontend/   window + input + audio (SDL3 or winit+wgpu, cpal)
     rv-net/        user-mode networking (smoltcp-based NAT, or libslirp binding)
   apps/
-    risc-vm/       CLI + GUI launcher
+    rust-v/       CLI + GUI launcher
   tests/           riscv-tests, riscv-arch-test, differential tests, boot tests
   firmware/        scripts to fetch/build OpenSBI, U-Boot / EDK2
 ```

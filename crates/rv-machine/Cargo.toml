@@ -1,6 +1,6 @@
 [package]
 name = "rv-machine"
-description = "The risc-vm board: memory map, interrupt controllers, timers, UART and device tree"
+description = "The rust-v board: memory map, interrupt controllers, timers, UART and device tree"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

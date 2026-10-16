@@ -106,7 +106,7 @@ fn spawn_console_input(uart: Arc<rv_machine::uart::Uart>, raw: bool) {
                     match b {
                         b'x' | b'X' => {
                             let _ = crossterm::terminal::disable_raw_mode();
-                            eprintln!("\r\nrisc-vm: terminated");
+                            eprintln!("\r\nrust-v: terminated");
                             std::process::exit(0);
                         }
                         ESCAPE => out.push(ESCAPE),
@@ -147,7 +147,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
     let interactive = std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };
     if interactive {
-        eprint!("risc-vm: press Ctrl-A x to quit\r\n");
+        eprint!("rust-v: press Ctrl-A x to quit\r\n");
     }
     spawn_console_input(machine.uart.clone(), interactive);
     let reason = match &args.gdb {
@@ -163,7 +163,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
         let insns = machine.instructions();
         let busy = machine.stats.busy.as_secs_f64();
         eprint!(
-            "\r\nrisc-vm: {insns} instructions, {busy:.2}s busy, {:.2}s idle, {:.1} MIPS\r\n",
+            "\r\nrust-v: {insns} instructions, {busy:.2}s busy, {:.2}s idle, {:.1} MIPS\r\n",
             machine.stats.idle.as_secs_f64(),
             insns as f64 / busy / 1e6
         );
@@ -171,7 +171,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
             use std::sync::atomic::Ordering::Relaxed;
             let blocks = jit.blocks.load(Relaxed).max(1);
             eprint!(
-                "risc-vm: JIT compiled {} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
+                "rust-v: JIT compiled {} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
                 jit.blocks.load(Relaxed),
                 jit.instructions.load(Relaxed),
                 jit.code_bytes.load(Relaxed) / 1024,
@@ -188,15 +188,15 @@ fn main() -> ExitCode {
     match run(Args::parse()) {
         Ok(Shutdown::PowerOff) => ExitCode::SUCCESS,
         Ok(Shutdown::Reset) => {
-            eprintln!("risc-vm: guest requested reset (not supported yet), exiting");
+            eprintln!("rust-v: guest requested reset (not supported yet), exiting");
             ExitCode::SUCCESS
         }
         Ok(Shutdown::Fail(code)) => {
-            eprintln!("risc-vm: guest reported failure {code}");
+            eprintln!("rust-v: guest reported failure {code}");
             ExitCode::from(code.clamp(1, 255) as u8)
         }
         Err(e) => {
-            eprintln!("risc-vm: {e}");
+            eprintln!("rust-v: {e}");
             ExitCode::FAILURE
         }
     }

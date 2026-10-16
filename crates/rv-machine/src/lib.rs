@@ -1,4 +1,4 @@
-//! The risc-vm board. Its memory map and devices follow QEMU's `virt` machine so that
+//! The rust-v board. Its memory map and devices follow QEMU's `virt` machine so that
 //! unmodified OpenSBI, U-Boot and Linux images run on it.
 
 pub mod clint;

@@ -26,7 +26,7 @@ pub fn build(p: &FdtParams) -> Result<Vec<u8>, Error> {
     fdt.property_u32("#address-cells", 2)?;
     fdt.property_u32("#size-cells", 2)?;
     fdt.property_string("compatible", "riscv-virtio")?;
-    fdt.property_string("model", "risc-vm,virt")?;
+    fdt.property_string("model", "rust-v,virt")?;
 
     let chosen = fdt.begin_node("chosen")?;
     fdt.property_string("bootargs", p.cmdline)?;
