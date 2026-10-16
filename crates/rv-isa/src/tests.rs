@@ -327,3 +327,18 @@ fn compressed_length() {
     assert_eq!(crate::insn_len(0x4501), 2);
     assert_eq!(crate::insn_len(0x0513), 4);
 }
+
+#[test]
+fn disassembles_vector_instructions() {
+    let cases = [
+        (0x0d0572d7, "vsetvli t0, a0, 0xd0"),
+        (0x0205e087, "vle32.v v1, (a1)"),
+        (0x02108157, "vadd.vv v2, v1, v1"),
+        (0x021021d7, "vredsum.vv v3, v1, v0"),
+        (0x02066127, "vse32.v v2, (a2)"),
+        (0x423026d7, "vmv.x.s a3, v3"),
+    ];
+    for (raw, text) in cases {
+        assert_eq!(decode(raw).to_string(), text);
+    }
+}

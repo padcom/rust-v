@@ -7,6 +7,7 @@
 mod decode;
 mod disasm;
 mod op;
+mod vector;
 
 pub use decode::{decode, insn_len};
 pub use disasm::reg_name;

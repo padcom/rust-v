@@ -44,6 +44,12 @@ impl fmt::Display for Insn {
             Format::FCmp => write!(f, "{m} {rd}, f{}, f{}", self.rs1, self.rs2),
             Format::FLi => write!(f, "{m} f{}, {}", self.rd, self.rs1),
             Format::R1 => write!(f, "{m} {rd}, {rs1}"),
+            Format::Vector => match self.op {
+                crate::Op::Vsetvli => write!(f, "{m} {rd}, {rs1}, {:#x}", imm),
+                crate::Op::Vsetivli => write!(f, "{m} {rd}, {}, {:#x}", self.rs1, imm),
+                crate::Op::Vsetvl => write!(f, "{m} {rd}, {rs1}, {rs2}"),
+                _ => crate::vector::fmt_vector(self, f),
+            },
             Format::Cbo => write!(f, "{m} ({rs1})"),
         }
     }

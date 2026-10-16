@@ -37,51 +37,13 @@ pub mod layout {
 use layout::*;
 
 /// Extensions implemented by the hart, as advertised to the guest.
+#[rustfmt::skip]
 pub const ISA_EXTENSIONS: &[&str] = &[
-    "i",
-    "m",
-    "a",
-    "f",
-    "d",
-    "c",
-    "zic64b",
-    "zicbom",
-    "zicbop",
-    "zicboz",
-    "ziccamoa",
-    "ziccif",
-    "zicclsm",
-    "ziccrse",
-    "zicntr",
-    "zicond",
-    "zicsr",
-    "zifencei",
-    "zihintntl",
-    "zihintpause",
-    "zihpm",
-    "zimop",
-    "za64rs",
-    "zawrs",
-    "zfa",
-    "zfhmin",
-    "zca",
-    "zcb",
-    "zcd",
-    "zcmop",
-    "zba",
-    "zbb",
-    "zbs",
-    "zkt",
-    "smnpm",
-    "smstateen",
-    "sscofpmf",
-    "ssnpm",
-    "ssstateen",
-    "sstc",
-    "svade",
-    "svinval",
-    "svnapot",
-    "svpbmt",
+    "i", "m", "a", "f", "d", "c", "v", "zic64b", "zicbom", "zicbop", "zicboz", "ziccamoa", "ziccif",
+    "zicclsm", "ziccrse", "zicntr", "zicond", "zicsr", "zifencei", "zihintntl", "zihintpause", "zihpm",
+    "zimop", "za64rs", "zawrs", "zfa", "zfhmin", "zca", "zcb", "zcd", "zcmop", "zba", "zbb", "zbs", "zkt",
+    "zvbb", "zvfh", "zvfhmin", "zvkt", "smnpm", "smstateen", "sscofpmf", "ssnpm", "ssstateen", "sstc",
+    "svade", "svinval", "svnapot", "svpbmt",
 ];
 
 /// Instructions a hart runs between timer and shutdown checks.
@@ -103,6 +65,8 @@ pub struct MachineConfig {
     pub jit: bool,
     /// Interpretations of a block before it gets compiled.
     pub jit_threshold: u32,
+    /// Vector register length in bits.
+    pub vlen: usize,
 }
 
 impl Default for MachineConfig {
@@ -116,6 +80,7 @@ impl Default for MachineConfig {
             max_satp_mode: rv_core::csr::satp::MODE_SV48,
             jit: false,
             jit_threshold: 16,
+            vlen: 128,
         }
     }
 }
@@ -254,7 +219,8 @@ impl Machine {
             .iter()
             .enumerate()
             .map(|(id, sh)| {
-                let cfg = HartConfig { hartid: id as u64, max_satp_mode: config.max_satp_mode };
+                let cfg =
+                    HartConfig { hartid: id as u64, max_satp_mode: config.max_satp_mode, vlen: config.vlen };
                 let mut hart = Hart::new(cfg, bus.clone(), sh.clone(), time.clone());
                 hart.reset(RAM_BASE);
                 // OpenSBI fw_dynamic boot protocol.

@@ -55,6 +55,8 @@ pub enum Format {
     R1,
     /// `(rs1)`
     Cbo,
+    /// Vector instruction; operands are decoded from the raw encoding.
+    Vector,
 }
 
 macro_rules! ops {
@@ -341,6 +343,15 @@ ops! {
     SinvalVma => "sinval.vma", SfenceVma;
     SfenceWInval => "sfence.w.inval", None;
     SfenceInvalIr => "sfence.inval.ir", None;
+
+    // V. Only the major forms are distinguished here; the vector unit decodes funct6, funct3,
+    // vm, width, mop and nf from `raw`.
+    Vsetvli => "vsetvli", Vector;
+    Vsetivli => "vsetivli", Vector;
+    Vsetvl => "vsetvl", Vector;
+    Vop => "vop", Vector;
+    Vload => "vload", Vector;
+    Vstore => "vstore", Vector;
 
     // Privileged
     Mret => "mret", None;

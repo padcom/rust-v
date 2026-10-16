@@ -7,6 +7,15 @@ pub const FFLAGS: u16 = 0x001;
 pub const FRM: u16 = 0x002;
 pub const FCSR: u16 = 0x003;
 
+// Unprivileged vector.
+pub const VSTART: u16 = 0x008;
+pub const VXSAT: u16 = 0x009;
+pub const VXRM: u16 = 0x00a;
+pub const VCSR: u16 = 0x00f;
+pub const VL: u16 = 0xc20;
+pub const VTYPE: u16 = 0xc21;
+pub const VLENB: u16 = 0xc22;
+
 // Unprivileged counters.
 pub const CYCLE: u16 = 0xc00;
 pub const TIME: u16 = 0xc01;
@@ -94,13 +103,14 @@ pub mod status {
     pub const UXL_SXL_64: u64 = (2 << 32) | (2 << 34);
     pub const SD: u64 = 1 << 63;
 
-    /// Bits of `mstatus` that M-mode software can write (VS is added when V exists).
-    pub const M_WRITABLE: u64 = SIE | MIE | SPIE | MPIE | SPP | MPP | FS | MPRV | SUM | MXR | TVM | TW | TSR;
+    /// Bits of `mstatus` that M-mode software can write.
+    pub const M_WRITABLE: u64 =
+        SIE | MIE | SPIE | MPIE | SPP | VS | MPP | FS | MPRV | SUM | MXR | TVM | TW | TSR;
     /// Bits of `mstatus` visible through `sstatus`.
     pub const S_VISIBLE: u64 =
         SIE | SPIE | UBE | SPP | VS | FS | XS | SUM | MXR | (UXL_SXL_64 & (3 << 32)) | SD;
     /// Bits of `mstatus` writable through `sstatus`.
-    pub const S_WRITABLE: u64 = SIE | SPIE | SPP | FS | SUM | MXR;
+    pub const S_WRITABLE: u64 = SIE | SPIE | SPP | VS | FS | SUM | MXR;
 }
 
 /// `menvcfg` / `senvcfg` fields.

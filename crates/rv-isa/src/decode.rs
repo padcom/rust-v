@@ -105,12 +105,15 @@ fn decode32(raw: u32) -> Insn {
             insn(op, 0, rs1, rs2, imm_s(raw))
         }
         0x07 => match f3 {
+            0 | 5 | 6 | 7 => insn(Op::Vload, rd, rs1, rs2, 0),
             1 => i(Op::Flh),
             2 => i(Op::Flw),
             3 => i(Op::Fld),
             _ => illegal,
         },
         0x27 => match f3 {
+            // For vector stores the "rd" field holds vs3, the data register.
+            0 | 5 | 6 | 7 => insn(Op::Vstore, rd, rs1, rs2, 0),
             1 => insn(Op::Fsh, 0, rs1, rs2, imm_s(raw)),
             2 => insn(Op::Fsw, 0, rs1, rs2, imm_s(raw)),
             3 => insn(Op::Fsd, 0, rs1, rs2, imm_s(raw)),
@@ -118,6 +121,13 @@ fn decode32(raw: u32) -> Insn {
         },
         0x43 | 0x47 | 0x4b | 0x4f => decode_fma(raw, rd, rs1, rs2, f3),
         0x53 => decode_fp(raw, rd, rs1, rs2, f3),
+        0x57 if f3 == 7 => match (bit(raw, 31), bit(raw, 30)) {
+            (0, _) => insn(Op::Vsetvli, rd, rs1, 0, bits(raw, 30, 20) as i32),
+            (1, 1) => insn(Op::Vsetivli, rd, rs1, 0, bits(raw, 29, 20) as i32),
+            _ if bits(raw, 31, 25) == 0x40 => insn(Op::Vsetvl, rd, rs1, rs2, 0),
+            _ => illegal,
+        },
+        0x57 => insn(Op::Vop, rd, rs1, rs2, 0),
         0x13 => {
             let shamt = bits(raw, 25, 20) as i32;
             let shift = |op| insn(op, rd, rs1, 0, shamt);

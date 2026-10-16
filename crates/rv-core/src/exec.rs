@@ -494,6 +494,9 @@ impl Hart {
                 self.state.tlb.flush();
             }
 
+            Op::Vsetvli | Op::Vsetivli | Op::Vsetvl | Op::Vop | Op::Vload | Op::Vstore => {
+                self.execute_vector(insn)?
+            }
             Op::Flh | Op::Flw | Op::Fld => self.fp_load(insn, rs1.wrapping_add(imm))?,
             Op::Fsh | Op::Fsw | Op::Fsd => self.fp_store(insn, rs1.wrapping_add(imm))?,
             _ => self.execute_fp(insn)?,

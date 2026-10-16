@@ -84,6 +84,11 @@ pub struct Csrs {
     pub fcsr: u64,
     pub stimecmp: u64,
     pub mstateen: [u64; 4],
+    pub vstart: u64,
+    pub vxsat: u64,
+    pub vxrm: u64,
+    pub vl: u64,
+    pub vtype: u64,
     pub pmpcfg: [u64; 8],
     pub pmpaddr: [u64; 64],
 }
@@ -117,6 +122,11 @@ impl Default for Csrs {
             fcsr: 0,
             stimecmp: u64::MAX,
             mstateen: [0; 4],
+            vstart: 0,
+            vxsat: 0,
+            vxrm: 0,
+            vl: 0,
+            vtype: crate::vector::VTYPE_VILL,
             pmpcfg: [0; 8],
             pmpaddr: [0; 64],
         }
@@ -131,6 +141,8 @@ pub struct HartState {
     pub x: [u64; 32],
     pub pc: u64,
     pub f: [u64; 32],
+    /// Vector registers v0..v31, `VLENB` bytes each (the array is sized for the maximum).
+    pub v: [u8; 32 * crate::vector::MAX_VLENB],
     pub privilege: Priv,
     pub csr: Csrs,
     pub tlb: Tlb,
@@ -189,11 +201,13 @@ pub struct HartConfig {
     pub hartid: u64,
     /// Most capable `satp` mode supported (8 = Sv39, 9 = Sv48, 10 = Sv57).
     pub max_satp_mode: u64,
+    /// Vector register length in bits: a power of two from 128 to `8 * MAX_VLENB`.
+    pub vlen: usize,
 }
 
 impl Default for HartConfig {
     fn default() -> Self {
-        HartConfig { hartid: 0, max_satp_mode: satp::MODE_SV57 }
+        HartConfig { hartid: 0, max_satp_mode: satp::MODE_SV57, vlen: 128 }
     }
 }
 
@@ -235,7 +249,8 @@ const MISA: u64 = misa::MXL_64
     | misa::ext(b'D')
     | misa::ext(b'F')
     | misa::ext(b'S')
-    | misa::ext(b'U');
+    | misa::ext(b'U')
+    | misa::ext(b'V');
 
 // `misa` cannot express multi-letter extensions; those are advertised through the device tree.
 
@@ -261,10 +276,16 @@ impl Hart {
         shared: Arc<HartShared>,
         time: Arc<dyn TimeSource>,
     ) -> Self {
+        assert!(
+            config.vlen.is_power_of_two() && (128..=8 * crate::vector::MAX_VLENB).contains(&config.vlen),
+            "unsupported VLEN {}",
+            config.vlen
+        );
         let state = Box::new(HartState {
             x: [0; 32],
             pc: 0,
             f: [0; 32],
+            v: [0; 32 * crate::vector::MAX_VLENB],
             privilege: Priv::Machine,
             csr: Csrs { misa: MISA, ..Csrs::default() },
             tlb: Tlb::new(),
@@ -291,6 +312,7 @@ impl Hart {
         let s = &mut *self.state;
         s.x = [0; 32];
         s.f = [0; 32];
+        s.v.fill(0);
         s.pc = pc;
         s.privilege = Priv::Machine;
         s.csr = Csrs { misa: MISA, ..Csrs::default() };
@@ -483,6 +505,20 @@ impl Hart {
                     _ => c.fcsr & 0xff,
                 }
             }
+            csr::VSTART | csr::VXSAT | csr::VXRM | csr::VCSR | csr::VL | csr::VTYPE | csr::VLENB => {
+                if !self.vector_enabled() {
+                    return Err(Exception::illegal(raw));
+                }
+                match csr {
+                    csr::VSTART => c.vstart,
+                    csr::VXSAT => c.vxsat,
+                    csr::VXRM => c.vxrm,
+                    csr::VCSR => (c.vxrm << 1) | c.vxsat,
+                    csr::VL => c.vl,
+                    csr::VTYPE => c.vtype,
+                    _ => self.vlenb() as u64,
+                }
+            }
             csr::CYCLE | csr::TIME | csr::INSTRET | csr::HPMCOUNTER3..=csr::HPMCOUNTER31 => {
                 if !self.counter_accessible(csr - csr::CYCLE) {
                     return Err(Exception::illegal(raw));
@@ -554,6 +590,19 @@ impl Hart {
     pub(crate) fn csr_write(&mut self, csr: u16, value: u64) {
         let c = &mut self.state.csr;
         match csr {
+            csr::VSTART | csr::VXSAT | csr::VXRM | csr::VCSR => {
+                match csr {
+                    // vstart only needs to hold element indices up to VLMAX.
+                    csr::VSTART => c.vstart = value & 0xffff,
+                    csr::VXSAT => c.vxsat = value & 1,
+                    csr::VXRM => c.vxrm = value & 3,
+                    _ => {
+                        c.vxsat = value & 1;
+                        c.vxrm = (value >> 1) & 3;
+                    }
+                }
+                c.mstatus |= status::VS;
+            }
             csr::FFLAGS | csr::FRM | csr::FCSR => {
                 c.fcsr = match csr {
                     csr::FFLAGS => (c.fcsr & !0x1f) | (value & 0x1f),

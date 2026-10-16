@@ -49,6 +49,10 @@ fn tests_dir() -> PathBuf {
 }
 
 fn run_test(path: &std::path::Path, jit: bool) -> (Outcome, String) {
+    run_elf(path, jit, MAX_INSNS)
+}
+
+fn run_elf(path: &std::path::Path, jit: bool, max_insns: u64) -> (Outcome, String) {
     let bytes = std::fs::read(path).unwrap();
     let elf = rv_elf::Elf::parse(&bytes).unwrap();
     let tohost = elf.symbol("tohost").unwrap().expect("test has no tohost symbol");
@@ -71,7 +75,7 @@ fn run_test(path: &std::path::Path, jit: bool) -> (Outcome, String) {
 
     let mut console = String::new();
     let mut executed = 0;
-    while executed < MAX_INSNS {
+    while executed < max_insns {
         hart.run(1000);
         executed += 1000;
         let value = bus.read(tohost, 8).unwrap();
@@ -131,4 +135,116 @@ fn run_suite(jit: bool) {
     let mode = if jit { "JIT" } else { "interpreter" };
     println!("{mode}: {} of {} riscv-tests passed", tests.len() - failures.len(), tests.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+/// Extensions the generated vector tests cover that risc-vm does not implement (vector crypto,
+/// Zvbc and bfloat16), as test-name prefixes.
+const VECTOR_UNSUPPORTED: &[&str] = &[
+    "vaes",
+    "vsm3",
+    "vsm4",
+    "vsha2",
+    "vghsh",
+    "vgmul",
+    "vclmul",
+    "vbf",
+    "vfwmaccbf16",
+    "vfncvtbf16",
+    "vfwcvtbf16",
+];
+
+fn vector_tests_dir() -> PathBuf {
+    match std::env::var_os("VECTOR_TESTS_DIR") {
+        Some(dir) => dir.into(),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/vector-tests/riscv-vector-tests/out/v128x64machine/bin/stage2"),
+    }
+}
+
+/// The chipsalliance riscv-vector-tests suite (VLEN=128), with expected values from Spike.
+/// Build it with `scripts/build-vector-tests.sh`.
+fn run_vector_suite(jit: bool) {
+    let dir = vector_tests_dir();
+    let filter = std::env::var("RISCV_TESTS_FILTER").unwrap_or_default();
+    let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e} (run scripts/build-vector-tests.sh)", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_str().unwrap();
+            !VECTOR_UNSUPPORTED.iter().any(|u| name.starts_with(u)) && name.contains(&filter)
+        })
+        .collect();
+    tests.sort();
+    assert!(!tests.is_empty(), "no tests found in {}", dir.display());
+
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let chunks: Vec<_> = tests.chunks(tests.len().div_ceil(8)).collect();
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .filter_map(|path| {
+                            let name = path.file_name().unwrap().to_str().unwrap();
+                            let (outcome, _) = run_elf(path, jit, 200_000_000);
+                            (outcome != Outcome::Pass).then(|| format!("{name}: {outcome:?}"))
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    let mode = if jit { "JIT" } else { "interpreter" };
+    println!("{mode}: {} of {} vector tests passed", tests.len() - failures.len(), tests.len());
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+}
+
+#[test]
+#[ignore = "needs scripts/build-vector-tests.sh"]
+fn vector_tests_interpreter() {
+    run_vector_suite(false);
+}
+
+#[test]
+#[ignore = "needs scripts/build-vector-tests.sh"]
+fn vector_tests_jit() {
+    run_vector_suite(true);
+}
+
+/// Debug aid: `VECTOR_DUMP=<elf> cargo test ... -- --ignored dump_result` runs one test and
+/// prints the first 64 bytes of its `resultdata`.
+#[test]
+#[ignore = "debugging aid"]
+fn dump_result() {
+    let Some(path) = std::env::var_os("VECTOR_DUMP") else { return };
+    let bytes = std::fs::read(&path).unwrap();
+    let elf = rv_elf::Elf::parse(&bytes).unwrap();
+    let tohost = elf.symbol("tohost").unwrap().unwrap();
+    let result = elf.symbol("resultdata").unwrap().unwrap();
+    let bus = Arc::new(Bus::new(RAM_BASE, RAM_SIZE));
+    for seg in elf.segments().unwrap() {
+        bus.load_image(seg.paddr, seg.data);
+    }
+    let mut hart = Hart::new(
+        HartConfig::default(),
+        bus.clone(),
+        Arc::new(HartShared::default()),
+        Arc::new(HostClock::new(10_000_000)),
+    );
+    hart.reset(elf.entry);
+    for _ in 0..200_000 {
+        hart.run(1000);
+        if bus.read(tohost, 8).unwrap() != 0 {
+            break;
+        }
+    }
+    let words: Vec<String> =
+        (0..8).map(|i| format!("{:016x}", bus.read(result + 8 * i, 8).unwrap())).collect();
+    println!("tohost={:#x} resultdata: {}", bus.read(tohost, 8).unwrap(), words.join(" "));
+    let a0 = hart.state.x[10];
+    let near: Vec<String> =
+        (0..6).map(|i| format!("{:016x}", bus.read(a0 - 24 + 8 * i, 8).unwrap_or(0))).collect();
+    println!("a0={a0:#x} t0={:#x} around a0-24: {}", hart.state.x[5], near.join(" "));
 }

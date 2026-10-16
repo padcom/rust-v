@@ -28,6 +28,9 @@ struct Args {
     /// Largest supported virtual-memory mode.
     #[arg(long, default_value = "sv48", value_parser = ["sv39", "sv48", "sv57"])]
     mmu: String,
+    /// Vector register length in bits (128, 256 or 512).
+    #[arg(long, default_value_t = 128, value_parser = parse_vlen)]
+    vlen: usize,
     /// Compile hot code to native instructions (experimental).
     #[arg(long)]
     jit: bool,
@@ -54,6 +57,13 @@ fn parse_size(s: &str) -> Result<u64, String> {
     };
     let n: u64 = digits.parse().map_err(|_| format!("invalid size `{s}`"))?;
     n.checked_shl(shift).filter(|v| v % 4096 == 0 && *v > 0).ok_or(format!("invalid size `{s}`"))
+}
+
+fn parse_vlen(s: &str) -> Result<usize, String> {
+    match s.parse() {
+        Ok(v @ (128 | 256 | 512)) => Ok(v),
+        _ => Err(format!("unsupported VLEN `{s}` (use 128, 256 or 512)")),
+    }
 }
 
 fn read(path: &PathBuf) -> Result<Vec<u8>, String> {
@@ -127,6 +137,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
         },
         jit: args.jit,
         jit_threshold: args.jit_threshold,
+        vlen: args.vlen,
     };
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {

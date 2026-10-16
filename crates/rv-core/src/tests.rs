@@ -144,3 +144,56 @@ fn fp_disabled_traps() {
     hart.state.csr.mstatus |= status::FS;
     hart.execute(&fadd).unwrap();
 }
+
+#[test]
+fn vector_smoke() {
+    let (mut hart, _) = hart();
+    hart.state.csr.mstatus |= status::VS;
+    // vsetvli t0, a0, e32, m1, ta, ma; vle32.v v1, (a1); vadd.vv v2, v1, v1;
+    // vredsum.vs v3, v1, v0; vse32.v v2, (a2); vmv.x.s a3, v3
+    let program = [0x0d0572d7u32, 0x0205e087, 0x02108157, 0x021021d7, 0x02066127, 0x423026d7];
+    for (i, w) in program.iter().enumerate() {
+        hart.bus.write(RAM + 4 * i as u64, 4, *w as u64);
+    }
+    for (i, v) in [1u64, 2, 3, 4].iter().enumerate() {
+        hart.bus.write(RAM + 0x100 + 4 * i as u64, 4, *v);
+    }
+    hart.state.x[10] = 100; // AVL larger than VLMAX
+    hart.state.x[11] = RAM + 0x100;
+    hart.state.x[12] = RAM + 0x200;
+    for _ in 0..program.len() {
+        hart.step();
+    }
+    assert_eq!(hart.state.pc, RAM + 4 * program.len() as u64, "no traps");
+    assert_eq!(hart.state.x[5], 4, "vl = VLMAX = VLEN / SEW");
+    let out: Vec<u64> = (0..4).map(|i| hart.bus.read(RAM + 0x200 + 4 * i, 4).unwrap()).collect();
+    assert_eq!(out, [2, 4, 6, 8]);
+    assert_eq!(hart.state.x[13], 10);
+}
+
+#[test]
+fn vfrec7_register_group() {
+    let (mut hart, _) = hart();
+    hart.state.csr.mstatus |= status::VS | status::FS;
+    let program = [0x0020d073u32, 0x00a2f357, 0x4e829257];
+    for (i, w) in program.iter().enumerate() {
+        hart.bus.write(RAM + 4 * i as u64, 4, *w as u64);
+    }
+    let input: [u64; 12] = [0xbe1d, 0, 0x8047, 1, 0xceff, 2, 0xb0be, 4, 0x4e07, 8, 0xfffc, 0x10];
+    for (i, &v) in input.iter().enumerate() {
+        hart.set_velem(8, i, 2, v);
+    }
+    hart.state.x[5] = 16;
+    for _ in 0..program.len() {
+        hart.step();
+    }
+    assert_eq!(
+        hart.state.pc,
+        RAM + 12,
+        "trap: mcause {} mepc {:#x}",
+        hart.state.csr.mcause,
+        hart.state.csr.mepc
+    );
+    let got: Vec<u64> = (8..12).map(|i| hart.velem(4, i, 2)).collect();
+    assert_eq!(got, [0x2950, 0x7bff, 0x7e00, 0x7bff]);
+}
