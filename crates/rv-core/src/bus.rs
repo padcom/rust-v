@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 
-use crate::mem::GuestRam;
+use crate::code::CodePages;
+use crate::mem::{GuestRam, PAGE_SHIFT};
 
 /// A memory-mapped device. Devices are shared between hart threads, so they take `&self`
 /// and use interior mutability.
@@ -23,11 +24,12 @@ pub struct Bus {
     ram: GuestRam,
     ram_base: u64,
     mmio: Vec<Mmio>,
+    code: CodePages,
 }
 
 impl Bus {
     pub fn new(ram_base: u64, ram_size: u64) -> Self {
-        Bus { ram: GuestRam::new(ram_size), ram_base, mmio: Vec::new() }
+        Bus { ram: GuestRam::new(ram_size), ram_base, mmio: Vec::new(), code: CodePages::new(ram_size) }
     }
 
     /// Maps `device` at `[base, base + size)`. Panics on overlap with RAM or another device.
@@ -39,8 +41,30 @@ impl Bus {
         self.mmio.push(Mmio { base, size, device });
     }
 
+    /// Read access to RAM. Writes must go through [`Bus::ram_store`] (or [`Bus::write`]) so
+    /// that cached code is invalidated.
     pub fn ram(&self) -> &GuestRam {
         &self.ram
+    }
+
+    pub fn code(&self) -> &CodePages {
+        &self.code
+    }
+
+    /// RAM page index of a host pointer into RAM.
+    #[inline(always)]
+    pub fn ram_page_of(&self, host: *const u8) -> usize {
+        (host as usize - self.ram.host_ptr(0) as usize) >> PAGE_SHIFT
+    }
+
+    /// Stores into RAM at offset `off`, invalidating cached code in the page.
+    #[inline]
+    pub fn ram_store(&self, off: u64, size: u8, value: u64) {
+        self.ram.store(off, size, value);
+        self.code.note_write((off >> PAGE_SHIFT) as usize);
+        if (off & 0xfff) + size as u64 > 0x1000 {
+            self.code.note_write(((off + size as u64 - 1) >> PAGE_SHIFT) as usize);
+        }
     }
 
     pub fn ram_base(&self) -> u64 {
@@ -82,7 +106,7 @@ impl Bus {
     /// Physical write. Returns `false` if nothing is mapped there (an access fault).
     pub fn write(&self, paddr: u64, size: u8, value: u64) -> bool {
         if let Some(off) = self.ram_offset(paddr, size as u64) {
-            self.ram.store(off, size, value);
+            self.ram_store(off, size, value);
             return true;
         }
         match self.device(paddr, size) {
@@ -100,5 +124,9 @@ impl Bus {
             .ram_offset(paddr, data.len() as u64)
             .unwrap_or_else(|| panic!("image at {paddr:#x} (+{:#x}) does not fit in RAM", data.len()));
         self.ram.write_bytes(off, data);
+        let last = off + data.len().max(1) as u64 - 1;
+        for page in (off >> PAGE_SHIFT)..=(last >> PAGE_SHIFT) {
+            self.code.note_write(page as usize);
+        }
     }
 }

@@ -28,6 +28,9 @@ struct Args {
     /// Largest supported virtual-memory mode.
     #[arg(long, default_value = "sv48", value_parser = ["sv39", "sv48", "sv57"])]
     mmu: String,
+    /// Print execution statistics on exit.
+    #[arg(long)]
+    stats: bool,
     /// Write the generated device tree blob to this file.
     #[arg(long)]
     dump_dtb: Option<PathBuf>,
@@ -127,6 +130,15 @@ fn run(args: Args) -> Result<Shutdown, String> {
     spawn_console_input(machine.uart.clone(), interactive);
     let reason = machine.run();
     let _ = std::io::stdout().flush();
+    if args.stats {
+        let insns = machine.instructions();
+        let busy = machine.stats.busy.as_secs_f64();
+        eprint!(
+            "\r\nrisc-vm: {insns} instructions, {busy:.2}s busy, {:.2}s idle, {:.1} MIPS\r\n",
+            machine.stats.idle.as_secs_f64(),
+            insns as f64 / busy / 1e6
+        );
+    }
     Ok(reason)
 }
 

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::block::BlockCache;
 use crate::bus::Bus;
 use crate::csr::{self, misa, satp, status};
 use crate::mmu::Tlb;
@@ -207,6 +208,7 @@ pub struct Hart {
     pub wfi: bool,
     /// Set when an instruction wrote `minstret` so that its own retirement is not counted.
     pub(crate) suppress_instret: bool,
+    pub(crate) blocks: BlockCache,
 }
 
 const MISA: u64 = misa::MXL_64
@@ -241,7 +243,17 @@ impl Hart {
             csr: Csrs { misa: MISA, ..Csrs::default() },
             tlb: Tlb::new(),
         });
-        Hart { state, shared, bus, config, time, reservation: None, wfi: false, suppress_instret: false }
+        Hart {
+            state,
+            shared,
+            bus,
+            config,
+            time,
+            reservation: None,
+            wfi: false,
+            suppress_instret: false,
+            blocks: BlockCache::default(),
+        }
     }
 
     /// Resets the hart to M-mode at `pc`.
@@ -255,6 +267,7 @@ impl Hart {
         s.tlb.flush();
         self.reservation = None;
         self.wfi = false;
+        self.blocks.clear();
     }
 
     #[inline(always)]

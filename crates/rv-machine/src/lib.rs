@@ -10,7 +10,7 @@ pub mod uart;
 
 use std::io::Write;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rv_core::{Bus, Exit, Hart, HartConfig, HartShared, HostClock, TimeSource};
 
@@ -77,6 +77,23 @@ pub struct Machine {
     pub power: Arc<power::PowerState>,
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
+    pub stats: Stats,
+}
+
+/// Execution statistics.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    /// Host time spent executing guest code (excludes time parked in WFI).
+    pub busy: Duration,
+    /// Host time spent parked in WFI.
+    pub idle: Duration,
+}
+
+impl Machine {
+    /// Instructions retired by all harts.
+    pub fn instructions(&self) -> u64 {
+        self.harts.iter().map(|h| h.state.csr.minstret).sum()
+    }
 }
 
 /// OpenSBI's `struct fw_dynamic_info` (version 2).
@@ -191,14 +208,16 @@ impl Machine {
             })
             .collect();
 
-        Ok(Machine { bus, harts, clint, plic, uart, power, dtb })
+        Ok(Machine { bus, harts, clint, plic, uart, power, dtb, stats: Stats::default() })
     }
 
     /// Runs until the guest powers off or resets the machine.
     pub fn run(&mut self) -> Shutdown {
         let hart = &mut self.harts[0];
         loop {
+            let started = Instant::now();
             let exit = hart.run(SLICE);
+            self.stats.busy += started.elapsed();
             self.clint.update_timers();
             if let Some(reason) = self.power.reason() {
                 return reason;
@@ -210,7 +229,9 @@ impl Machine {
                     let ticks = deadline - now;
                     let wait =
                         Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / TIMEBASE_HZ)).min(MAX_IDLE);
+                    let started = Instant::now();
                     hart.shared.wait(wait);
+                    self.stats.idle += started.elapsed();
                 }
                 self.clint.update_timers();
             }

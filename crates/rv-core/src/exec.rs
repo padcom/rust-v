@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use rv_isa::{Insn, Op, decode};
 
+use crate::block::{Block, decode_block};
 use crate::csr::status;
 use crate::hart::{Hart, Priv, Reservation};
+use crate::mem::PAGE_SIZE;
 use crate::mmu::Access;
 use crate::trap::{Exception, cause};
 
@@ -26,9 +28,10 @@ const fn sext32(v: u64) -> u64 {
 }
 
 impl Hart {
-    /// Runs up to `budget` instructions.
+    /// Runs up to `budget` instructions (possibly a few more, to finish a block).
     pub fn run(&mut self, budget: u64) -> Exit {
-        for _ in 0..budget {
+        let mut executed = 0;
+        while executed < budget {
             if self.shared.exit_request.load(Ordering::Relaxed) != 0 {
                 self.shared.exit_request.store(0, Ordering::Relaxed);
                 // Re-read mip after clearing the request so that no raise can be lost.
@@ -43,26 +46,93 @@ impl Hart {
                 }
                 self.wfi = false;
             }
-            self.step();
+            if let Some(irq) = self.pending_interrupt() {
+                self.take_trap(irq, 0);
+                continue;
+            }
+            executed += self.run_block();
         }
         Exit::Budget
     }
 
-    /// Executes one instruction, or takes one pending interrupt.
+    /// Executes the block at `pc`. Returns the number of instructions attempted.
+    fn run_block(&mut self) -> u64 {
+        let block = match self.lookup_block() {
+            Ok(Some(b)) => b,
+            // An instruction straddling a page boundary: execute it on its own.
+            Ok(None) => {
+                self.step_one();
+                return 1;
+            }
+            Err(e) => {
+                self.take_trap(e.cause, e.tval);
+                return 1;
+            }
+        };
+        let len = self.blocks.block(block).insns.len();
+        for i in 0..len {
+            let insn = self.blocks.block(block).insns[i];
+            let pc = self.state.pc;
+            match self.execute(&insn) {
+                Ok(()) => self.retire(),
+                Err(e) => {
+                    self.take_trap(e.cause, e.tval);
+                    return i as u64 + 1;
+                }
+            }
+            if self.state.pc != pc.wrapping_add(insn.len as u64) {
+                return i as u64 + 1;
+            }
+        }
+        len as u64
+    }
+
+    /// Finds (decoding if needed) the block starting at `pc`.
+    fn lookup_block(&mut self) -> Result<Option<u32>, Exception> {
+        let host = self.fetch_ptr(self.state.pc)?;
+        let page = self.bus.ram_page_of(host);
+        if let Some(idx) = self.blocks.get(host)
+            && self.blocks.block(idx).generation == self.bus.code().generation(page)
+        {
+            return Ok(Some(idx));
+        }
+        // Mark the page before reading its generation and contents, so that any write from
+        // here on is detected.
+        if self.bus.code().mark(page) {
+            let page_host = (host as usize & !(PAGE_SIZE as usize - 1)) as *const u8;
+            self.flush_store_tlb_host_page(page_host);
+        }
+        let generation = self.bus.code().generation(page);
+        // SAFETY: `fetch_ptr` returned a pointer into guest RAM with at least 2 bytes left
+        // in the page.
+        let insns = unsafe { decode_block(host) };
+        if insns.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.blocks.insert(host, Block { insns: insns.into_boxed_slice(), generation })))
+    }
+
+    #[inline(always)]
+    fn retire(&mut self) {
+        if !std::mem::take(&mut self.suppress_instret) {
+            self.state.csr.minstret = self.state.csr.minstret.wrapping_add(1);
+        }
+        self.state.csr.mcycle = self.state.csr.mcycle.wrapping_add(1);
+    }
+
+    /// Executes one instruction, or takes one pending interrupt, bypassing the block cache.
     pub fn step(&mut self) {
         if let Some(irq) = self.pending_interrupt() {
             self.wfi = false;
             self.take_trap(irq, 0);
             return;
         }
-        let result = self.fetch().and_then(|insn| self.execute(&insn));
-        match result {
-            Ok(()) => {
-                if !std::mem::take(&mut self.suppress_instret) {
-                    self.state.csr.minstret = self.state.csr.minstret.wrapping_add(1);
-                }
-                self.state.csr.mcycle = self.state.csr.mcycle.wrapping_add(1);
-            }
+        self.step_one();
+    }
+
+    fn step_one(&mut self) {
+        match self.fetch().and_then(|insn| self.execute(&insn)) {
+            Ok(()) => self.retire(),
             Err(e) => self.take_trap(e.cause, e.tval),
         }
     }
@@ -209,6 +279,9 @@ impl Hart {
                     Some(r) if r.paddr == paddr && r.size == size => unsafe { cas(ptr, size, r.value, rs2) },
                     _ => false,
                 };
+                if success {
+                    self.bus.code().note_write(self.bus.ram_page_of(ptr));
+                }
                 self.set_x(rd, !success as u64);
             }
             Op::AmoswapW
@@ -243,6 +316,7 @@ impl Hart {
                         })
                         .unwrap(),
                 };
+                self.bus.code().note_write(self.bus.ram_page_of(ptr));
                 self.set_x(rd, sext32(old as u64));
             }
             Op::AmoswapD
@@ -276,11 +350,13 @@ impl Hart {
                         })
                         .unwrap(),
                 };
+                self.bus.code().note_write(self.bus.ram_page_of(ptr));
                 self.set_x(rd, old);
             }
 
             Op::Fence => fence(Ordering::SeqCst),
-            // No translated or cached code yet, so there is nothing to invalidate.
+            // Writes to cached code are detected through code-page generations, so there is
+            // nothing to flush; the block simply ends here.
             Op::FenceI => fence(Ordering::SeqCst),
 
             Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci => {

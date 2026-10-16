@@ -105,13 +105,28 @@ impl Hart {
         (e.tag == vpn).then(|| vaddr.wrapping_add(e.addend) as *mut u8)
     }
 
-    /// Enters the page containing `vaddr` -> `paddr` into the TLB if it is RAM.
+    /// Enters the page containing `vaddr` -> `paddr` into the TLB if it is RAM. Pages holding
+    /// cached code are never entered into the store TLB, so that every write to them is seen.
     fn tlb_fill(&mut self, p: Priv, access: Access, vaddr: u64, paddr: u64) {
         let page = paddr & !(PAGE_SIZE - 1);
         if let Some(host) = self.bus.ram_ptr(page, PAGE_SIZE) {
+            if access == Access::Store && self.bus.code().is_code(self.bus.ram_page_of(host)) {
+                return;
+            }
             let vpn = vaddr >> PAGE_SHIFT;
             self.state.tlb.entries[tlb_index(p)][access as usize][vpn as usize % TLB_ENTRIES] =
                 TlbEntry { tag: vpn, addend: (host as u64).wrapping_sub(vaddr & !(PAGE_SIZE - 1)) };
+        }
+    }
+
+    /// Drops every store-TLB entry that maps the RAM page at host address `page_host`.
+    pub(crate) fn flush_store_tlb_host_page(&mut self, page_host: *const u8) {
+        for set in &mut self.state.tlb.entries {
+            for e in &mut set[Access::Store as usize] {
+                if e.tag != TAG_INVALID && (e.tag << PAGE_SHIFT).wrapping_add(e.addend) == page_host as u64 {
+                    e.tag = TAG_INVALID;
+                }
+            }
         }
     }
 
@@ -269,7 +284,7 @@ impl Hart {
             if let Some(p) = fill {
                 self.tlb_fill(p, Access::Store, vaddr, paddr);
             }
-            self.bus.ram().store(off, size, value);
+            self.bus.ram_store(off, size, value);
             return Ok(());
         }
         if self.bus.write(paddr, size, value) {
@@ -279,21 +294,29 @@ impl Hart {
         }
     }
 
-    /// Fetches the 16-bit instruction parcel at `vaddr`.
+    /// Host pointer to the instruction parcel at `vaddr`, checking execute permission.
+    /// The rest of the page is executable too.
     #[inline]
-    pub fn fetch16(&mut self, vaddr: u64) -> Result<u16, Exception> {
+    pub fn fetch_ptr(&mut self, vaddr: u64) -> Result<*const u8, Exception> {
         let p = self.state.privilege;
         if let Some(host) = self.tlb_lookup(p, Access::Fetch, vaddr) {
-            // SAFETY: TLB entries only ever point at whole pages of guest RAM.
-            return Ok(unsafe { host_load(host, 2) } as u16);
+            return Ok(host);
         }
         let paddr = self.translate(vaddr, Access::Fetch, p)?;
         // Instructions can only be fetched from RAM.
-        let Some(off) = self.bus.ram_offset(paddr, 2) else {
+        let Some(host) = self.bus.ram_ptr(paddr, 2) else {
             return Err(Exception::new(cause::INSN_ACCESS, vaddr));
         };
         self.tlb_fill(p, Access::Fetch, vaddr, paddr);
-        Ok(self.bus.ram().load(off, 2) as u16)
+        Ok(host)
+    }
+
+    /// Fetches the 16-bit instruction parcel at `vaddr`.
+    #[inline]
+    pub fn fetch16(&mut self, vaddr: u64) -> Result<u16, Exception> {
+        let host = self.fetch_ptr(vaddr)?;
+        // SAFETY: `fetch_ptr` returns pointers into guest RAM with at least 2 bytes left.
+        Ok(unsafe { host_load(host, 2) } as u16)
     }
 
     /// Resolves an atomic access (LR, SC, AMO) to a host pointer and physical address.

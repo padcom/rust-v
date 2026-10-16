@@ -1,6 +1,8 @@
 //! A RISC-V hart: architectural state, CSRs, traps, MMU and the reference interpreter.
 
+mod block;
 pub mod bus;
+pub mod code;
 pub mod csr;
 mod exec;
 pub mod hart;
