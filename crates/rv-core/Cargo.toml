@@ -1,0 +1,15 @@
+[package]
+name = "rv-core"
+description = "RISC-V hart: architectural state, CSRs, traps, MMU and interpreter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rv-isa.workspace = true
+
+[dev-dependencies]
+rv-elf.workspace = true
+
+[lints]
+workspace = true
