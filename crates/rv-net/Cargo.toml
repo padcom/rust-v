@@ -1,0 +1,13 @@
+[package]
+name = "rv-net"
+description = "User-mode networking for rust-v: NAT to host sockets, DHCP and DNS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mio = { version = "1.2.4", features = ["os-poll", "net"] }
+smoltcp = { version = "0.14.0", default-features = false, features = ["std", "medium-ethernet", "proto-ipv4", "socket-tcp", "socket-tcp-pause-synack", "auto-icmp-echo-reply"] }
+
+[lints]
+workspace = true

@@ -55,6 +55,12 @@ struct Args {
     /// Attach a raw disk image as a virtio-blk drive; append `,ro` for read-only. Repeatable.
     #[arg(long, value_name = "PATH[,ro]")]
     disk: Vec<String>,
+    /// Do not add a network card.
+    #[arg(long)]
+    no_net: bool,
+    /// Forward a host TCP port to a guest port, e.g. 2222:22 (repeatable).
+    #[arg(long, value_name = "[HOST_ADDR:]HOST_PORT:GUEST_PORT", value_parser = parse_forward)]
+    forward: Vec<(std::net::SocketAddr, u16)>,
     /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
     #[arg(long, value_name = "[HOST:]PORT")]
     gdb: Option<String>,
@@ -75,6 +81,14 @@ fn parse_size(s: &str) -> Result<u64, String> {
     };
     let n: u64 = digits.parse().map_err(|_| format!("invalid size `{s}`"))?;
     n.checked_shl(shift).filter(|v| v % 4096 == 0 && *v > 0).ok_or(format!("invalid size `{s}`"))
+}
+
+fn parse_forward(s: &str) -> Result<(std::net::SocketAddr, u16), String> {
+    let err = || format!("invalid forward `{s}` (expected [HOST_ADDR:]HOST_PORT:GUEST_PORT)");
+    let (host, guest) = s.rsplit_once(':').ok_or_else(err)?;
+    let guest: u16 = guest.parse().map_err(|_| err())?;
+    let host = if host.contains(':') { host.to_string() } else { format!("127.0.0.1:{host}") };
+    Ok((host.parse().map_err(|_| err())?, guest))
 }
 
 fn parse_vlen(s: &str) -> Result<usize, String> {
@@ -176,6 +190,8 @@ fn run(args: Args) -> Result<Shutdown, String> {
         threaded: !args.single_thread,
         drives: args.disk.iter().map(|d| open_disk(d)).collect::<Result<_, _>>()?,
         rng: true,
+        net: (!args.no_net)
+            .then(|| rv_machine::rv_net::Config { tcp_forwards: args.forward.clone(), ..Default::default() }),
     };
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {

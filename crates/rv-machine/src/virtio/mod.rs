@@ -1,6 +1,7 @@
 //! Virtio 1.x devices behind the modern virtio-pci transport.
 
 pub mod blk;
+pub mod net;
 pub mod pci;
 pub mod queue;
 pub mod rng;

@@ -69,6 +69,25 @@ fn boot_linux_jit_small_cache() {
     boot(true, 1 << 20);
 }
 
+/// Serves one HTTP response with body `{tag}-from-host` on a loopback port; returns the port.
+fn serve_http_once(tag: &str) -> u16 {
+    use std::io::{BufRead, BufReader};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = format!("{tag}-from-host");
+    std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+            line.clear();
+        }
+        let mut stream = reader.into_inner();
+        let _ = write!(stream, "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+    });
+    port
+}
+
 fn rv_jit_cache_default() -> usize {
     MachineConfig::default().jit_cache_size
 }
@@ -79,6 +98,7 @@ fn boot(jit: bool, jit_cache_size: usize) {
     disk[..16].copy_from_slice(b"RUST-V DISK TEST");
     let config = MachineConfig {
         drives: vec![Drive { backend: Box::new(disk), read_only: false }],
+        net: Some(rv_machine::rv_net::Config::default()),
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),
@@ -132,6 +152,19 @@ fn boot(jit: bool, jit_cache_size: usize) {
         b"echo rng-$(cat /sys/class/misc/hw_random/rng_current)-$(head -c 8 /dev/hwrng | wc -c)\n",
     );
     pos = console.wait_for("rng-virtio_rng.0-8", pos, timeout);
+    // virtio-net with user-mode networking: DHCP, ping, DNS and HTTP to a server on the host,
+    // reached through the gateway address.
+    let port = serve_http_once("net-ok");
+    uart.push_input(
+        b"ip link set eth0 up; udhcpc -i eth0 -q -n -s /bin/true 2>&1 | grep -o 'lease of [0-9.]*'\n",
+    );
+    pos = console.wait_for("lease of 10.0.2.15", pos, timeout);
+    uart.push_input(b"ip addr add 10.0.2.15/24 dev eth0; ip route add default via 10.0.2.2; ping -c 1 10.0.2.2 >/dev/null && echo ping-$((40+2))\n");
+    pos = console.wait_for("ping-42", pos, timeout);
+    uart.push_input(b"nslookup localhost 10.0.2.3 | grep -o 'Address: 127[.0-9]*'\n");
+    pos = console.wait_for("Address: 127.0.0.1", pos, timeout);
+    uart.push_input(format!("wget -q -O - http://10.0.2.2:{port}/; echo\n").as_bytes());
+    pos = console.wait_for("net-ok-from-host", pos, timeout);
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 

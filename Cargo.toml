@@ -15,6 +15,7 @@ rv-core = { path = "crates/rv-core" }
 rv-elf = { path = "crates/rv-elf" }
 rv-machine = { path = "crates/rv-machine" }
 rv-jit = { path = "crates/rv-jit" }
+rv-net = { path = "crates/rv-net" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

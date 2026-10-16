@@ -19,6 +19,7 @@ use rv_core::{Bus, Exit, Hart, HartConfig, HartShared, HostClock, TimeSource};
 
 pub use power::Shutdown;
 pub use rv_jit::Stats as JitStats;
+pub use rv_net;
 
 pub mod layout {
     pub const TEST_BASE: u64 = 0x0010_0000;
@@ -93,6 +94,8 @@ pub struct MachineConfig {
     pub drives: Vec<Drive>,
     /// Add a virtio-rng device.
     pub rng: bool,
+    /// Add a virtio-net device on a user-mode network with these settings.
+    pub net: Option<rv_net::Config>,
 }
 
 /// A virtio-blk disk.
@@ -119,6 +122,7 @@ impl Default for MachineConfig {
             threaded: true,
             drives: Vec::new(),
             rng: true,
+            net: None,
         }
     }
 }
@@ -217,6 +221,13 @@ impl Machine {
         for (i, drive) in config.drives.into_iter().enumerate() {
             let id = format!("rust-v-disk{i}");
             virtio_devices.push(Box::new(virtio::blk::Blk::new(drive.backend, drive.read_only, &id)));
+        }
+        if let Some(net_config) = config.net {
+            let (mut net, rx) = virtio::net::Net::new(net_config.guest_mac);
+            let backend = rv_net::UserNet::spawn(net_config, Box::new(move |frame| rx.receive(frame)))
+                .map_err(|e| Error::Layout(format!("user-mode networking: {e}")))?;
+            net.set_backend(Box::new(backend));
+            virtio_devices.push(Box::new(net));
         }
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
