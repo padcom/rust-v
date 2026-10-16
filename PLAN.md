@@ -14,7 +14,8 @@ is fast enough to use GNOME and a web browser.
 | 2.5: JIT spike | ✅ Cranelift block JIT behind `--jit`: CoreMark 666 → 2272 it/s (3.4×), riscv-tests and Linux boot pass under the JIT. Findings and Phase 5 decisions in [docs/jit-spike.md](docs/jit-spike.md): chaining first (68% of hot time is dispatch), compile off-thread (~15 µs per guest instruction) |
 | 3: Full RVA23 ISA | ✅ F/D/Zfa/Zfhmin on a TestFloat-verified softfloat (busybox/glibc userland runs); Zba/Zbb/Zbs/Zicond/Zcb/Zimop/Zcmop/Zawrs/Zicbo*/Svinval; Sstc, Svpbmt, Svnapot, Smstateen/Ssstateen, Smnpm/Ssnpm, Sscofpmf; RVV 1.0 + Zvfh/Zvfhmin/Zvbb (2993/2993 Spike-checked riscv-vector-tests). H deferred to Phase 10 |
 | 4: SMP | ✅ 4 harts on host threads (or round-robin with `--single-thread`); OpenSBI HSM bring-up, IPIs, remote fences; atomics/LR-SC/message-passing litmus and cross-modifying-code tests; Linux reports 4 CPUs and scales 3.9× on a parallel workload |
-| 5: Full JIT | next: block chaining, off-thread compilation, own code cache (see docs/jit-spike.md) |
+| 5: Full JIT | ✅ on by default: tail-call block chaining, inline indirect-jump cache, background compilation per hart, own code cache (MAP_JIT on Apple Silicon) with flush-on-full, interpreter helper for FP/atomics/vector. CoreMark ~6400 it/s (2.1 GIPS, ~10× interpreter); Linux to init in 1.1 s on 4 harts. Lockstep interp-vs-JIT mode replaced by running every conformance suite in both modes (and with a tiny code cache) |
+| 6: Virtio + Ubuntu Server | next |
 
 ---
 

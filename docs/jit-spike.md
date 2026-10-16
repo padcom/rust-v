@@ -91,3 +91,27 @@ freed when guest code is invalidated.
    `com.apple.security.cs.allow-jit` entitlement. Do it together with item 5.
 7. **Keep compiling per data privilege.** Compiled code is specialized by data-access privilege,
    because it inlines that privilege's TLB table. That's cheap and correct; keep it.
+
+## Outcome (Phase 5)
+
+What was built on these findings, measured on the same host:
+
+| | Spike | Phase 5 |
+|---|---|---|
+| CoreMark (1 hart) | 2272 it/s, 0.72 GIPS | ~6400 it/s, 2.1 GIPS |
+| Time in generated code (CoreMark) | 32 % | ~99 % |
+| Linux boot to init (1 hart) | 1.11 s (threshold 4096) / 2.09 s (16) | 0.93 s (threshold 16) |
+| Compile cost | 105 µs/block, on the hart thread | ~80 µs/block, on a background thread |
+
+1. **Chaining** (decision 1): static exits tail-call their successor through chain slots
+   (Cranelift `tail` convention); indirect jumps go through the fetch TLB and a per-hart jump
+   cache keyed by host address.
+2. **Background compilation** (decision 2): one compiler thread per hart.
+3. Larger translation units (decision 3) were not needed yet.
+4. **Own code cache** (decisions 5 and 6): cranelift-codegen output copied into a contiguous
+   region, `MAP_JIT` with per-thread write protection on Apple Silicon. Contiguous code alone
+   roughly doubled CoreMark compared with cranelift-jit's page-per-function layout. A full cache
+   is flushed by the hart at the dispatcher.
+5. `opt_level = none` turned out both faster to compile and faster to run for these blocks.
+6. Instructions without a native translation run through an interpreter helper inside compiled
+   code, so only CSR/system instructions end compilation.
