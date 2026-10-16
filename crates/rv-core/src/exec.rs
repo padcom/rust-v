@@ -72,7 +72,8 @@ impl Hart {
                 return 1;
             }
         };
-        if self.compiler.is_some() {
+        // Compiled code inlines the TLB lookup without pointer masking.
+        if self.compiler.is_some() && self.pm_len[crate::mmu::tlb_index(self.data_priv())] == 0 {
             let data_priv = self.data_priv();
             let b = self.blocks.block_mut(block);
             match b.jit {
@@ -520,6 +521,7 @@ impl Hart {
             return Err(Exception::illegal(insn.raw));
         }
         let p = self.data_priv();
+        let addr = self.mask_pointer(addr, p);
         let block = addr & !(CACHE_BLOCK - 1);
         if insn.op == Op::CboZero {
             let paddr = self.translate(block, Access::Store, p).map_err(|e| Exception::new(e.cause, addr))?;

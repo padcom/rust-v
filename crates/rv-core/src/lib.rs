@@ -15,3 +15,6 @@ pub mod trap;
 pub use bus::{Bus, Device};
 pub use exec::Exit;
 pub use hart::{Hart, HartConfig, HartShared, HostClock, Priv, TimeSource};
+
+#[cfg(test)]
+mod tests;

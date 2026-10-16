@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::block::BlockCache;
 use crate::bus::Bus;
-use crate::csr::{self, envcfg, misa, satp, status};
+use crate::csr::{self, envcfg, misa, satp, stateen, status};
 use crate::jit::BlockCompiler;
 use crate::mmu::Tlb;
 use crate::trap::{Exception, INTERRUPT_BIT, cause, irq};
@@ -82,6 +82,8 @@ pub struct Csrs {
     pub minstret: u64,
     /// `frm` in bits 7:5, `fflags` in bits 4:0.
     pub fcsr: u64,
+    pub stimecmp: u64,
+    pub mstateen: [u64; 4],
     pub pmpcfg: [u64; 8],
     pub pmpaddr: [u64; 64],
 }
@@ -113,6 +115,8 @@ impl Default for Csrs {
             mcycle: 0,
             minstret: 0,
             fcsr: 0,
+            stimecmp: u64::MAX,
+            mstateen: [0; 4],
             pmpcfg: [0; 8],
             pmpaddr: [0; 64],
         }
@@ -219,6 +223,8 @@ pub struct Hart {
     pub jit_threshold: u32,
     /// Exception raised inside a compiled block, picked up by `run_compiled`.
     pub(crate) jit_exception: Option<Exception>,
+    /// Pointer-masking length (PMLEN) for data accesses at U, S and M; 0 when disabled.
+    pub(crate) pm_len: [u8; 3],
 }
 
 const MISA: u64 = misa::MXL_64
@@ -231,14 +237,22 @@ const MISA: u64 = misa::MXL_64
     | misa::ext(b'S')
     | misa::ext(b'U');
 
-const MIP_M_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI);
-const MIE_WRITABLE: u64 =
-    (1 << irq::SSI) | (1 << irq::MSI) | (1 << irq::STI) | (1 << irq::MTI) | (1 << irq::SEI) | (1 << irq::MEI);
-const MIDELEG_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI);
+// `misa` cannot express multi-letter extensions; those are advertised through the device tree.
+
+const MIP_M_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI) | (1 << irq::LCOFI);
+const MIE_WRITABLE: u64 = (1 << irq::SSI)
+    | (1 << irq::MSI)
+    | (1 << irq::STI)
+    | (1 << irq::MTI)
+    | (1 << irq::SEI)
+    | (1 << irq::MEI)
+    | (1 << irq::LCOFI);
+const MIDELEG_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI) | (1 << irq::LCOFI);
 /// All synchronous exceptions except ECALL from M-mode (and reserved causes).
 const MEDELEG_WRITABLE: u64 = 0xb3ff;
-const MENVCFG_WRITABLE: u64 = envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE;
-const SENVCFG_WRITABLE: u64 = envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE;
+const MENVCFG_WRITABLE: u64 =
+    envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE | envcfg::PMM | envcfg::PBMTE | envcfg::STCE;
+const SENVCFG_WRITABLE: u64 = envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE | envcfg::PMM;
 
 impl Hart {
     pub fn new(
@@ -268,6 +282,7 @@ impl Hart {
             compiler: None,
             jit_threshold: 16,
             jit_exception: None,
+            pm_len: [0; 3],
         }
     }
 
@@ -283,6 +298,7 @@ impl Hart {
         self.reservation = None;
         self.wfi = false;
         self.blocks.clear();
+        self.pm_len = [0; 3];
     }
 
     #[inline(always)]
@@ -435,11 +451,20 @@ impl Hart {
         if (self.state.privilege as u16) < min_priv || (write && read_only) {
             return Err(Exception::illegal(raw));
         }
-        if csr == csr::SATP
-            && self.state.privilege == Priv::Supervisor
-            && self.state.csr.mstatus & status::TVM != 0
-        {
-            return Err(Exception::illegal(raw));
+        if self.state.privilege == Priv::Supervisor {
+            let c = &self.state.csr;
+            let denied = match csr {
+                csr::SATP => c.mstatus & status::TVM != 0,
+                csr::STIMECMP => c.menvcfg & envcfg::STCE == 0 || c.mcounteren & csr::COUNTEREN_TM == 0,
+                csr::SENVCFG => c.mstateen[0] & stateen::ENVCFG == 0,
+                csr::SSTATEEN0..=csr::SSTATEEN3 => {
+                    c.mstateen[(csr - csr::SSTATEEN0) as usize] & stateen::SE0 == 0
+                }
+                _ => false,
+            };
+            if denied {
+                return Err(Exception::illegal(raw));
+            }
         }
         Ok(())
     }
@@ -481,6 +506,11 @@ impl Hart {
             csr::STVAL => c.stval,
             csr::SIP => mip & c.mideleg,
             csr::SATP => c.satp,
+            csr::STIMECMP => c.stimecmp,
+            csr::SSTATEEN0..=csr::SSTATEEN3 => 0,
+            // No counter can overflow: the HPM counters are hard-wired to zero.
+            csr::SCOUNTOVF => 0,
+            csr::MSTATEEN0..=csr::MSTATEEN3 => c.mstateen[(csr - csr::MSTATEEN0) as usize],
 
             csr::MVENDORID | csr::MARCHID | csr::MIMPID | csr::MCONFIGPTR => 0,
             csr::MHARTID => self.config.hartid,
@@ -542,16 +572,27 @@ impl Hart {
             }
             csr::STVEC => c.stvec = legal_tvec(c.stvec, value),
             csr::SCOUNTEREN => c.scounteren = value & 0xffff_ffff,
-            csr::SENVCFG => c.senvcfg = legal_cbie(value & SENVCFG_WRITABLE),
+            csr::SENVCFG => {
+                c.senvcfg = legal_envcfg(c.senvcfg, value & SENVCFG_WRITABLE);
+                self.update_pointer_masking();
+            }
             csr::SSCRATCH => c.sscratch = value,
             csr::SEPC => c.sepc = value & !1,
             csr::SCAUSE => c.scause = value,
             csr::STVAL => c.stval = value,
             csr::SIP => {
-                let mask = c.mideleg & (1 << irq::SSI);
+                let mask = c.mideleg & ((1 << irq::SSI) | (1 << irq::LCOFI));
                 self.write_mip(mask, value);
             }
             csr::SATP => self.write_satp(value),
+            csr::STIMECMP => {
+                c.stimecmp = value;
+                self.update_timer_interrupts();
+            }
+            csr::MSTATEEN0 => c.mstateen[0] = value & (stateen::SE0 | stateen::ENVCFG),
+            csr::MSTATEEN1..=csr::MSTATEEN3 => {
+                c.mstateen[(csr - csr::MSTATEEN0) as usize] = value & stateen::SE0;
+            }
 
             csr::MSTATUS => self.write_mstatus(value),
             csr::MISA => {} // WARL, not writable
@@ -560,13 +601,25 @@ impl Hart {
             csr::MIE => c.mie = value & MIE_WRITABLE,
             csr::MTVEC => c.mtvec = legal_tvec(c.mtvec, value),
             csr::MCOUNTEREN => c.mcounteren = value & 0xffff_ffff,
-            csr::MENVCFG => c.menvcfg = legal_cbie(value & MENVCFG_WRITABLE),
+            csr::MENVCFG => {
+                let old = c.menvcfg;
+                c.menvcfg = legal_envcfg(old, value & MENVCFG_WRITABLE);
+                if (old ^ c.menvcfg) & envcfg::PBMTE != 0 {
+                    self.state.tlb.flush();
+                }
+                self.update_pointer_masking();
+                self.update_timer_interrupts();
+            }
             csr::MCOUNTINHIBIT => c.mcountinhibit = value & 0xffff_fffd,
             csr::MSCRATCH => c.mscratch = value,
             csr::MEPC => c.mepc = value & !1,
             csr::MCAUSE => c.mcause = value,
             csr::MTVAL => c.mtval = value,
-            csr::MIP => self.write_mip(MIP_M_WRITABLE, value),
+            csr::MIP => {
+                // With Sstc enabled, STIP reflects the stimecmp comparator and is read-only.
+                let stip = if c.menvcfg & envcfg::STCE != 0 { 1 << irq::STI } else { 0 };
+                self.write_mip(MIP_M_WRITABLE & !stip, value);
+            }
             csr::PMPCFG0..=csr::PMPCFG15 => c.pmpcfg[(csr - csr::PMPCFG0) as usize / 2] = value,
             csr::PMPADDR0..=csr::PMPADDR63 => {
                 c.pmpaddr[(csr - csr::PMPADDR0) as usize] = value & ((1 << 54) - 1);
@@ -605,6 +658,35 @@ impl Hart {
         self.state.tlb.flush();
     }
 
+    /// Sstc: drives STIP from `time >= stimecmp` while `menvcfg.STCE` is set.
+    pub fn update_timer_interrupts(&mut self) {
+        if self.state.csr.menvcfg & envcfg::STCE == 0 {
+            return;
+        }
+        let pending = self.mtime() >= self.state.csr.stimecmp;
+        let current = self.shared.mip.load(Ordering::Relaxed) & (1 << irq::STI) != 0;
+        if pending != current {
+            self.shared.set_irq(1 << irq::STI, pending);
+        }
+    }
+
+    /// The `time` value at which this hart's own (Sstc) timer fires, if enabled.
+    pub fn timer_deadline(&self) -> Option<u64> {
+        (self.state.csr.menvcfg & envcfg::STCE != 0).then_some(self.state.csr.stimecmp)
+    }
+
+    /// Recomputes the pointer-masking length for each data-access privilege.
+    fn update_pointer_masking(&mut self) {
+        let pmlen = |envcfg: u64| match (envcfg & envcfg::PMM) >> envcfg::PMM_SHIFT {
+            2 => 7,
+            3 => 16,
+            _ => 0,
+        };
+        // senvcfg controls U-mode (Ssnpm), menvcfg controls S-mode (Smnpm); M-mode masking
+        // (Smmpm) is not implemented.
+        self.pm_len = [pmlen(self.state.csr.senvcfg), pmlen(self.state.csr.menvcfg), 0];
+    }
+
     /// The exception cause an ECALL raises at the current privilege.
     pub(crate) fn ecall_cause(&self) -> u64 {
         match self.state.privilege {
@@ -615,9 +697,16 @@ impl Hart {
     }
 }
 
-/// CBIE is WARL; the reserved value 10 reads back as 00.
-fn legal_cbie(value: u64) -> u64 {
-    if value & envcfg::CBIE == 2 << 4 { value & !envcfg::CBIE } else { value }
+/// Keeps the WARL fields of `menvcfg`/`senvcfg` legal: CBIE's reserved value 10 reads as 00,
+/// and PMM's reserved value 01 leaves the field unchanged.
+fn legal_envcfg(old: u64, mut value: u64) -> u64 {
+    if value & envcfg::CBIE == 2 << 4 {
+        value &= !envcfg::CBIE;
+    }
+    if (value & envcfg::PMM) >> envcfg::PMM_SHIFT == 1 {
+        value = (value & !envcfg::PMM) | (old & envcfg::PMM);
+    }
+    value
 }
 
 /// `xtvec` is WARL: only direct (0) and vectored (1) modes exist; base must be 4-byte aligned.

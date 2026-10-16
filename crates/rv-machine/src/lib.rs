@@ -44,16 +44,23 @@ pub const ISA_EXTENSIONS: &[&str] = &[
     "f",
     "d",
     "c",
+    "zic64b",
     "zicbom",
     "zicbop",
     "zicboz",
+    "ziccamoa",
+    "ziccif",
+    "zicclsm",
+    "ziccrse",
     "zicntr",
     "zicond",
     "zicsr",
     "zifencei",
     "zihintntl",
     "zihintpause",
+    "zihpm",
     "zimop",
+    "za64rs",
     "zawrs",
     "zfa",
     "zfhmin",
@@ -64,7 +71,17 @@ pub const ISA_EXTENSIONS: &[&str] = &[
     "zba",
     "zbb",
     "zbs",
+    "zkt",
+    "smnpm",
+    "smstateen",
+    "sscofpmf",
+    "ssnpm",
+    "ssstateen",
+    "sstc",
+    "svade",
     "svinval",
+    "svnapot",
+    "svpbmt",
 ];
 
 /// Instructions a hart runs between timer and shutdown checks.
@@ -275,13 +292,16 @@ impl Machine {
     /// in WFI (for at most `MAX_IDLE`).
     pub fn service(&mut self, exit: Exit) -> Option<Shutdown> {
         self.clint.update_timers();
+        for hart in &mut self.harts {
+            hart.update_timer_interrupts();
+        }
         if let Some(reason) = self.power.reason() {
             return Some(reason);
         }
         if exit == Exit::Wfi {
             let hart = &self.harts[0];
             let now = hart.mtime();
-            let deadline = self.clint.mtimecmp(0);
+            let deadline = self.clint.mtimecmp(0).min(hart.timer_deadline().unwrap_or(u64::MAX));
             if deadline > now {
                 let ticks = deadline - now;
                 let wait =
@@ -291,6 +311,9 @@ impl Machine {
                 self.stats.idle += started.elapsed();
             }
             self.clint.update_timers();
+            for hart in &mut self.harts {
+                hart.update_timer_interrupts();
+            }
         }
         None
     }

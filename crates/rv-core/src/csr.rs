@@ -26,6 +26,10 @@ pub const SCAUSE: u16 = 0x142;
 pub const STVAL: u16 = 0x143;
 pub const SIP: u16 = 0x144;
 pub const SATP: u16 = 0x180;
+pub const STIMECMP: u16 = 0x14d;
+pub const SSTATEEN0: u16 = 0x10c;
+pub const SSTATEEN3: u16 = 0x10f;
+pub const SCOUNTOVF: u16 = 0xda0;
 
 // Machine.
 pub const MVENDORID: u16 = 0xf11;
@@ -41,6 +45,9 @@ pub const MIE: u16 = 0x304;
 pub const MTVEC: u16 = 0x305;
 pub const MCOUNTEREN: u16 = 0x306;
 pub const MENVCFG: u16 = 0x30a;
+pub const MSTATEEN0: u16 = 0x30c;
+pub const MSTATEEN1: u16 = 0x30d;
+pub const MSTATEEN3: u16 = 0x30f;
 pub const MCOUNTINHIBIT: u16 = 0x320;
 pub const MHPMEVENT3: u16 = 0x323;
 pub const MHPMEVENT31: u16 = 0x33f;
@@ -104,9 +111,23 @@ pub mod envcfg {
     pub const CBIE: u64 = 3 << 4;
     pub const CBCFE: u64 = 1 << 6;
     pub const CBZE: u64 = 1 << 7;
+    /// Pointer masking mode for the next lower privilege (Smnpm/Ssnpm).
+    pub const PMM: u64 = 3 << 32;
+    pub const PMM_SHIFT: u32 = 32;
     pub const PBMTE: u64 = 1 << 62;
     pub const STCE: u64 = 1 << 63;
 }
+
+/// `mstateenN` fields.
+pub mod stateen {
+    /// Access to `sstateenN` from S-mode.
+    pub const SE0: u64 = 1 << 63;
+    /// Access to `senvcfg` from S-mode (`mstateen0` only).
+    pub const ENVCFG: u64 = 1 << 62;
+}
+
+/// `mcounteren` bit for the `time` CSR (also gates `stimecmp`).
+pub const COUNTEREN_TM: u64 = 1 << 1;
 
 /// `satp` fields.
 pub mod satp {

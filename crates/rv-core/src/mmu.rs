@@ -6,7 +6,7 @@
 //! is the layout the JIT will inline. Only RAM pages are ever entered, so MMIO always takes
 //! the slow path.
 
-use crate::csr::{satp, status};
+use crate::csr::{envcfg, satp, status};
 use crate::hart::{Hart, Priv};
 use crate::mem::{PAGE_SHIFT, PAGE_SIZE, host_load, host_store};
 use crate::trap::{Exception, cause};
@@ -73,7 +73,7 @@ impl Default for Tlb {
 }
 
 #[inline(always)]
-const fn tlb_index(p: Priv) -> usize {
+pub(crate) const fn tlb_index(p: Priv) -> usize {
     match p {
         Priv::User => 0,
         Priv::Supervisor => 1,
@@ -96,6 +96,18 @@ impl Hart {
         } else {
             s.privilege
         }
+    }
+
+    /// Applies pointer masking (Smnpm/Ssnpm) to a data address accessed at privilege `p`.
+    #[inline(always)]
+    pub(crate) fn mask_pointer(&self, vaddr: u64, p: Priv) -> u64 {
+        let n = self.pm_len[tlb_index(p)] as u32;
+        if n == 0 {
+            return vaddr;
+        }
+        let translated = p != Priv::Machine && self.state.csr.satp >> satp::MODE_SHIFT != satp::MODE_BARE;
+        // Virtual addresses are sign-extended from the new top bit, physical ones zero-extended.
+        if translated { (((vaddr << n) as i64) >> n) as u64 } else { (vaddr << n) >> n }
     }
 
     #[inline(always)]
@@ -175,15 +187,19 @@ impl Hart {
                 pte & 0x40 != 0,
                 pte & 0x80 != 0,
             );
-            // Bits 63:54 are reserved until Svpbmt/Svnapot are implemented.
-            if !v || (!r && w) || pte >> 54 != 0 {
+            // Bits 60:54 are reserved; 62:61 hold the Svpbmt memory type (3 is reserved) and
+            // bit 63 marks Svnapot pages.
+            let pbmt = (pte >> 61) & 3;
+            let napot = pte >> 63 != 0;
+            let pbmt_ok = pbmt == 0 || (pbmt != 3 && self.state.csr.menvcfg & envcfg::PBMTE != 0);
+            if !v || (!r && w) || (pte >> 54) & 0x7f != 0 || !pbmt_ok {
                 return Err(page_fault);
             }
-            let ppn = (pte >> 10) & satp::PPN_MASK;
+            let mut ppn = (pte >> 10) & satp::PPN_MASK;
 
             if !r && !x {
-                // Pointer to the next level.
-                if level == 0 {
+                // Pointer to the next level; N and PBMT are reserved here.
+                if level == 0 || napot || pbmt != 0 {
                     return Err(page_fault);
                 }
                 table = ppn << PAGE_SHIFT;
@@ -202,6 +218,13 @@ impl Hart {
             };
             if !permitted || !priv_ok {
                 return Err(page_fault);
+            }
+            if napot {
+                // Only 64 KiB NAPOT pages (ppn[3:0] = 1000) exist.
+                if level != 0 || ppn & 0xf != 0b1000 {
+                    return Err(page_fault);
+                }
+                ppn = (ppn & !0xf) | ((vaddr >> PAGE_SHIFT) & 0xf);
             }
             // Superpages must be aligned.
             let low_ppn_mask = (1u64 << (9 * level)) - 1;
@@ -224,6 +247,7 @@ impl Hart {
     #[inline]
     pub fn load(&mut self, vaddr: u64, size: u8) -> Result<u64, Exception> {
         let p = self.data_priv();
+        let vaddr = self.mask_pointer(vaddr, p);
         if !crosses_page(vaddr, size) {
             if let Some(host) = self.tlb_lookup(p, Access::Load, vaddr) {
                 // SAFETY: TLB entries only ever point at whole pages of guest RAM.
@@ -251,6 +275,7 @@ impl Hart {
     #[inline]
     pub fn store(&mut self, vaddr: u64, size: u8, value: u64) -> Result<(), Exception> {
         let p = self.data_priv();
+        let vaddr = self.mask_pointer(vaddr, p);
         if !crosses_page(vaddr, size) {
             if let Some(host) = self.tlb_lookup(p, Access::Store, vaddr) {
                 // SAFETY: TLB entries only ever point at whole pages of guest RAM.
@@ -332,10 +357,11 @@ impl Hart {
             Access::Load => (cause::LOAD_MISALIGNED, cause::LOAD_ACCESS),
             _ => (cause::STORE_MISALIGNED, cause::STORE_ACCESS),
         };
+        let p = self.data_priv();
+        let vaddr = self.mask_pointer(vaddr, p);
         if vaddr & (size as u64 - 1) != 0 {
             return Err(Exception::new(misaligned, vaddr));
         }
-        let p = self.data_priv();
         let paddr = self.translate(vaddr, access, p)?;
         match self.bus.ram_ptr(paddr, size as u64) {
             Some(ptr) => Ok((ptr, paddr)),

@@ -27,6 +27,7 @@ const SUITES: &[&str] = &[
     "rv64mi",
     "rv64si",
     "rv64mzicbo",
+    "rv64ssvnapot",
 ];
 
 /// Outcome of a single test binary.
