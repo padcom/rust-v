@@ -33,7 +33,7 @@ Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful option
 | `--vlen 256` | vector register length (128, 256 or 512 bits) |
 | `--append "..."` | kernel command line |
 | `--mmu sv39\|sv48\|sv57` | largest virtual-memory mode offered to the guest |
-| `--jit` | compile hot code to native instructions (experimental) |
+| `--no-jit` | interpret only (the JIT compiles hot code by default) |
 | `--gdb 1234` | wait for a GDB (or `lldb` `gdb-remote`) connection, starting halted |
 | `--stats` | print instruction count and MIPS on exit |
 | `--dump-dtb file.dtb` | save the generated device tree |

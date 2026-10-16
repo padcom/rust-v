@@ -52,22 +52,35 @@ fn image(name: &str) -> Vec<u8> {
 #[test]
 #[ignore = "needs scripts/build-guest-images.sh"]
 fn boot_linux() {
-    boot(false);
+    boot(false, rv_jit_cache_default());
 }
 
 #[test]
 #[ignore = "needs scripts/build-guest-images.sh"]
 fn boot_linux_jit() {
-    boot(true);
+    boot(true, rv_jit_cache_default());
 }
 
-fn boot(jit: bool) {
+/// A cache small enough to fill up many times during boot, exercising flushes while all four
+/// harts compile in the background.
+#[test]
+#[ignore = "needs scripts/build-guest-images.sh"]
+fn boot_linux_jit_small_cache() {
+    boot(true, 1 << 20);
+}
+
+fn rv_jit_cache_default() -> usize {
+    MachineConfig::default().jit_cache_size
+}
+
+fn boot(jit: bool, jit_cache_size: usize) {
     let console = Capture::default();
     let config = MachineConfig {
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),
         jit,
+        jit_cache_size,
         // Compile aggressively so that as much of the boot as possible runs as native code.
         jit_threshold: 2,
         ..MachineConfig::default()

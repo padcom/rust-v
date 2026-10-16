@@ -109,6 +109,8 @@ pub struct BlockInfo {
     pub generation: u32,
     /// RAM page index of the block.
     pub page: usize,
+    /// Code cache epoch the request was made in; results from an older epoch are stale.
+    pub cache_epoch: u32,
 }
 
 // SAFETY: the generation pointer refers to the bus, which outlives every hart and compiler.
@@ -123,6 +125,9 @@ pub enum Compiled {
     Unsupported,
     /// Compiling in the background; the result arrives through [`BlockCompiler::poll`].
     Pending,
+    /// The code cache is full. The hart must drop all compiled code and call
+    /// [`BlockCompiler::reset`].
+    CacheFull,
 }
 
 pub trait BlockCompiler: Send {
@@ -137,6 +142,11 @@ pub trait BlockCompiler: Send {
 
     /// The trampoline used to enter compiled code.
     fn entry(&self) -> JitEntry;
+
+    /// Empties the code cache. The caller guarantees that no compiled code is running or
+    /// referenced any more. Requests made before the reset may still report results; their
+    /// `cache_epoch` identifies them.
+    fn reset(&mut self) {}
 }
 
 /// Layout of [`HartState`] as seen by generated code.

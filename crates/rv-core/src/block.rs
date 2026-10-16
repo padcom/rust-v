@@ -125,6 +125,10 @@ impl BlockCache {
         idx
     }
 
+    pub fn blocks_mut(&mut self) -> impl Iterator<Item = &mut Block> {
+        self.blocks.iter_mut()
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.blocks.clear();

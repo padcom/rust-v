@@ -238,6 +238,8 @@ pub struct Hart {
     pub jit_threshold: u32,
     /// Background compilations not yet installed.
     pub(crate) jit_pending: usize,
+    /// Incremented whenever the code cache is flushed.
+    pub(crate) jit_cache_epoch: u32,
     /// Exception raised inside a compiled block, picked up by `run_compiled`.
     pub(crate) jit_exception: Option<Exception>,
     /// Pointer-masking length (PMLEN) for data accesses at U, S and M; 0 when disabled.
@@ -307,6 +309,7 @@ impl Hart {
             compiler: None,
             jit_threshold: 16,
             jit_pending: 0,
+            jit_cache_epoch: 0,
             jit_exception: None,
             pm_len: [0; 3],
         };

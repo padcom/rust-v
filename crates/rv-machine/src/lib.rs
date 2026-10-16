@@ -70,6 +70,8 @@ pub struct MachineConfig {
     pub jit_threshold: u32,
     /// Compile on background threads (otherwise the hart stalls while compiling).
     pub jit_background: bool,
+    /// Size of each hart's code cache, in bytes.
+    pub jit_cache_size: usize,
     /// Vector register length in bits.
     pub vlen: usize,
     /// Number of harts.
@@ -87,9 +89,10 @@ impl Default for MachineConfig {
             initrd: None,
             cmdline: "console=ttyS0 earlycon=sbi".into(),
             max_satp_mode: rv_core::csr::satp::MODE_SV48,
-            jit: false,
+            jit: true,
             jit_threshold: 16,
             jit_background: true,
+            jit_cache_size: rv_jit::CODE_CACHE_SIZE,
             vlen: 128,
             harts: 4,
             threaded: true,
@@ -249,11 +252,13 @@ impl Machine {
         if config.jit {
             for (id, hart) in harts.iter_mut().enumerate() {
                 let compiler: Box<dyn rv_core::jit::BlockCompiler> = if config.jit_background {
-                    let c = rv_jit::ThreadedCompiler::new(&format!("jit{id}")).map_err(Error::Jit)?;
+                    let c =
+                        rv_jit::ThreadedCompiler::with_cache_size(&format!("jit{id}"), config.jit_cache_size)
+                            .map_err(Error::Jit)?;
                     jit_stats.get_or_insert_with(Vec::new).push(c.stats());
                     Box::new(c)
                 } else {
-                    let c = rv_jit::Compiler::new().map_err(Error::Jit)?;
+                    let c = rv_jit::Compiler::with_cache_size(config.jit_cache_size).map_err(Error::Jit)?;
                     jit_stats.get_or_insert_with(Vec::new).push(c.stats());
                     Box::new(c)
                 };

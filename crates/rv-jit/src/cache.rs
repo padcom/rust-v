@@ -13,6 +13,8 @@ pub struct CodeCache {
     base: NonNull<u8>,
     size: usize,
     used: usize,
+    /// Bytes at the start of the cache that survive a reset (the entry trampoline).
+    reserved: usize,
 }
 
 // SAFETY: the cache only hands out addresses; writing is serialised through `&mut self`.
@@ -23,7 +25,17 @@ const ALIGN: usize = 16;
 impl CodeCache {
     pub fn new(size: usize) -> Result<Self, String> {
         let base = map(size)?;
-        Ok(CodeCache { base, size, used: 0 })
+        Ok(CodeCache { base, size, used: 0, reserved: 0 })
+    }
+
+    /// Keeps everything installed so far across future resets.
+    pub fn reserve_current(&mut self) {
+        self.reserved = self.used;
+    }
+
+    /// Forgets all code installed after the reserved prefix.
+    pub fn reset(&mut self) {
+        self.used = self.reserved;
     }
 
     /// Copies `code` into the cache and makes it executable. `None` if the cache is full.

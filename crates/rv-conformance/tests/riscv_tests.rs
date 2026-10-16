@@ -48,11 +48,20 @@ fn tests_dir() -> PathBuf {
     }
 }
 
-fn run_test(path: &std::path::Path, jit: bool) -> (Outcome, String) {
-    run_elf(path, jit, MAX_INSNS)
+/// How a test binary is executed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mode {
+    Interpreter,
+    Jit,
+    /// JIT with a code cache small enough to be flushed every few hundred blocks.
+    JitTinyCache,
 }
 
-fn run_elf(path: &std::path::Path, jit: bool, max_insns: u64) -> (Outcome, String) {
+fn run_test(path: &std::path::Path, mode: Mode) -> (Outcome, String) {
+    run_elf(path, mode, MAX_INSNS)
+}
+
+fn run_elf(path: &std::path::Path, mode: Mode, max_insns: u64) -> (Outcome, String) {
     let bytes = std::fs::read(path).unwrap();
     let elf = rv_elf::Elf::parse(&bytes).unwrap();
     let tohost = elf.symbol("tohost").unwrap().expect("test has no tohost symbol");
@@ -68,10 +77,14 @@ fn run_elf(path: &std::path::Path, jit: bool, max_insns: u64) -> (Outcome, Strin
         Arc::new(HostClock::new(10_000_000)),
     );
     hart.reset(elf.entry);
-    if jit {
-        hart.compiler = Some(Box::new(rv_jit::Compiler::new().unwrap()));
-        hart.jit_threshold = 1;
+    match mode {
+        Mode::Interpreter => {}
+        Mode::Jit => hart.compiler = Some(Box::new(rv_jit::Compiler::new().unwrap())),
+        Mode::JitTinyCache => {
+            hart.compiler = Some(Box::new(rv_jit::Compiler::with_cache_size(64 << 10).unwrap()))
+        }
     }
+    hart.jit_threshold = 1;
 
     let mut console = String::new();
     let mut executed = 0;
@@ -97,16 +110,22 @@ fn run_elf(path: &std::path::Path, jit: bool, max_insns: u64) -> (Outcome, Strin
 #[test]
 #[ignore = "needs scripts/build-riscv-tests.sh"]
 fn riscv_tests_interpreter() {
-    run_suite(false);
+    run_suite(Mode::Interpreter);
 }
 
 #[test]
 #[ignore = "needs scripts/build-riscv-tests.sh"]
 fn riscv_tests_jit() {
-    run_suite(true);
+    run_suite(Mode::Jit);
 }
 
-fn run_suite(jit: bool) {
+#[test]
+#[ignore = "needs scripts/build-riscv-tests.sh"]
+fn riscv_tests_jit_tiny_cache() {
+    run_suite(Mode::JitTinyCache);
+}
+
+fn run_suite(mode: Mode) {
     let dir = tests_dir();
     let filter = std::env::var("RISCV_TESTS_FILTER").unwrap_or_default();
     let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -127,13 +146,12 @@ fn run_suite(jit: bool) {
     let mut failures = Vec::new();
     for path in &tests {
         let name = path.file_name().unwrap().to_str().unwrap();
-        let (outcome, console) = run_test(path, jit);
+        let (outcome, console) = run_test(path, mode);
         if outcome != Outcome::Pass {
             failures.push(format!("{name}: {outcome:?} {}", console.trim()));
         }
     }
-    let mode = if jit { "JIT" } else { "interpreter" };
-    println!("{mode}: {} of {} riscv-tests passed", tests.len() - failures.len(), tests.len());
+    println!("{mode:?}: {} of {} riscv-tests passed", tests.len() - failures.len(), tests.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
@@ -163,7 +181,7 @@ fn vector_tests_dir() -> PathBuf {
 
 /// The chipsalliance riscv-vector-tests suite (VLEN=128), with expected values from Spike.
 /// Build it with `scripts/build-vector-tests.sh`.
-fn run_vector_suite(jit: bool) {
+fn run_vector_suite(mode: Mode) {
     let dir = vector_tests_dir();
     let filter = std::env::var("RISCV_TESTS_FILTER").unwrap_or_default();
     let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -187,7 +205,7 @@ fn run_vector_suite(jit: bool) {
                         .iter()
                         .filter_map(|path| {
                             let name = path.file_name().unwrap().to_str().unwrap();
-                            let (outcome, _) = run_elf(path, jit, 200_000_000);
+                            let (outcome, _) = run_elf(path, mode, 200_000_000);
                             (outcome != Outcome::Pass).then(|| format!("{name}: {outcome:?}"))
                         })
                         .collect::<Vec<_>>()
@@ -196,21 +214,20 @@ fn run_vector_suite(jit: bool) {
             .collect();
         handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
     });
-    let mode = if jit { "JIT" } else { "interpreter" };
-    println!("{mode}: {} of {} vector tests passed", tests.len() - failures.len(), tests.len());
+    println!("{mode:?}: {} of {} vector tests passed", tests.len() - failures.len(), tests.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }
 
 #[test]
 #[ignore = "needs scripts/build-vector-tests.sh"]
 fn vector_tests_interpreter() {
-    run_vector_suite(false);
+    run_vector_suite(Mode::Interpreter);
 }
 
 #[test]
 #[ignore = "needs scripts/build-vector-tests.sh"]
 fn vector_tests_jit() {
-    run_vector_suite(true);
+    run_vector_suite(Mode::Jit);
 }
 
 /// Debug aid: `VECTOR_DUMP=<elf> cargo test ... -- --ignored dump_result` runs one test and

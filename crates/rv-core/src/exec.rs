@@ -192,6 +192,7 @@ impl Hart {
             page_generation: self.bus.code().generation_ptr(page),
             generation,
             page,
+            cache_epoch: self.jit_cache_epoch,
         };
         let result = self.compiler.as_mut().unwrap().compile(&insns, info);
         let b = self.blocks.block_mut(block);
@@ -209,6 +210,26 @@ impl Hart {
                 self.jit_pending += 1;
                 None
             }
+            Compiled::CacheFull => {
+                self.flush_jit();
+                None
+            }
+        }
+    }
+
+    /// Drops every reference to compiled code and empties the code cache.
+    fn flush_jit(&mut self) {
+        for b in self.blocks.blocks_mut() {
+            b.jit = None;
+            b.jit_pending = false;
+            b.jit_failed = false;
+            b.hits = 0;
+        }
+        self.state.jit.jump_cache.fill(Default::default());
+        self.state.jit.chain_from = 0;
+        self.jit_cache_epoch = self.jit_cache_epoch.wrapping_add(1);
+        if let Some(c) = self.compiler.as_mut() {
+            c.reset();
         }
     }
 
@@ -216,6 +237,13 @@ impl Hart {
     fn install_compiled(&mut self) {
         while let Some((info, result)) = self.compiler.as_mut().and_then(|c| c.poll()) {
             self.jit_pending -= 1;
+            if info.cache_epoch != self.jit_cache_epoch {
+                continue;
+            }
+            if result == Compiled::CacheFull {
+                self.flush_jit();
+                continue;
+            }
             let Some(idx) = self.blocks.get(info.host as *const u8) else { continue };
             let b = self.blocks.block_mut(idx);
             // The block may have been replaced (new generation) since the request was made.

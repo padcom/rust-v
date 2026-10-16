@@ -37,9 +37,15 @@ struct Args {
     /// Vector register length in bits (128, 256 or 512).
     #[arg(long, default_value_t = 128, value_parser = parse_vlen)]
     vlen: usize,
-    /// Compile hot code to native instructions (experimental).
+    /// Interpret only: do not compile hot code to native instructions.
     #[arg(long)]
+    no_jit: bool,
+    /// Compile hot code to native instructions (the default; kept for compatibility).
+    #[arg(long, hide = true)]
     jit: bool,
+    /// Size of each hart's code cache in MiB.
+    #[arg(long, hide = true)]
+    jit_cache_mib: Option<usize>,
     /// Compile on the hart's own thread instead of a background thread (for comparison).
     #[arg(long, hide = true)]
     jit_sync: bool,
@@ -144,9 +150,10 @@ fn run(args: Args) -> Result<Shutdown, String> {
             "sv48" => 9,
             _ => 10,
         },
-        jit: args.jit,
+        jit: !args.no_jit,
         jit_threshold: args.jit_threshold,
         jit_background: !args.jit_sync,
+        jit_cache_size: args.jit_cache_mib.map_or(MachineConfig::default().jit_cache_size, |m| m << 20),
         vlen: args.vlen,
         harts: args.smp as usize,
         threaded: !args.single_thread,
@@ -187,10 +194,11 @@ fn run(args: Args) -> Result<Shutdown, String> {
             let blocks = sum(|s| &s.blocks);
             let nanos = sum(|s| &s.nanos);
             eprint!(
-                "rust-v: JIT compiled {blocks} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
+                "rust-v: JIT compiled {blocks} blocks ({} instructions, {} KiB code, {} rejected, {} cache flushes), {:.1} us/block, {:.2}s total\r\n",
                 sum(|s| &s.instructions),
                 sum(|s| &s.code_bytes) / 1024,
                 sum(|s| &s.rejected),
+                sum(|s| &s.flushes),
                 nanos as f64 / blocks.max(1) as f64 / 1e3,
                 nanos as f64 / 1e9,
             );

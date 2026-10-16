@@ -41,6 +41,8 @@ pub struct Stats {
     pub rejected: AtomicU64,
     pub nanos: AtomicU64,
     pub code_bytes: AtomicU64,
+    /// Times the code cache filled up and was emptied.
+    pub flushes: AtomicU64,
 }
 
 pub struct Compiler {
@@ -176,11 +178,16 @@ fn supported(op: Op) -> bool {
     )
 }
 
-/// Size of each compiler's code cache.
-const CODE_CACHE_SIZE: usize = 512 << 20;
+/// Default size of each compiler's code cache.
+pub const CODE_CACHE_SIZE: usize = 256 << 20;
 
 impl Compiler {
     pub fn new() -> Result<Self, String> {
+        Self::with_cache_size(CODE_CACHE_SIZE)
+    }
+
+    /// A compiler whose code cache holds `cache_size` bytes.
+    pub fn with_cache_size(cache_size: usize) -> Result<Self, String> {
         let mut flags = settings::builder();
         // Blocks are small; Cranelift's optimisations cost more compile time than they save.
         let opt = std::env::var("RV_JIT_OPT").unwrap_or_else(|_| "none".into());
@@ -209,7 +216,7 @@ impl Compiler {
         block_sig.returns.push(AbiParam::new(I64));
 
         let mut compiler = Compiler {
-            cache: cache::CodeCache::new(CODE_CACHE_SIZE)?,
+            cache: cache::CodeCache::new(cache_size)?,
             isa,
             ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
@@ -222,6 +229,7 @@ impl Compiler {
             jump_cache: std::env::var_os("RV_JIT_NO_JUMP_CACHE").is_none(),
         };
         compiler.entry = compiler.build_entry()?;
+        compiler.cache.reserve_current();
         Ok(compiler)
     }
 
@@ -279,20 +287,23 @@ impl BlockCompiler for Compiler {
     }
 
     fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
-        match self.compile_now(insns, info) {
-            Some(code) => Compiled::Code(code),
-            None => Compiled::Unsupported,
-        }
+        self.compile_now(insns, info)
+    }
+
+    fn reset(&mut self) {
+        self.cache.reset();
+        self.slots.clear();
+        self.stats.flushes.fetch_add(1, Ordering::Relaxed);
     }
 }
 
 impl Compiler {
-    fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Option<JitCode> {
+    fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
         let data_priv = info.data_priv;
         let count = insns.iter().take_while(|i| supported(i.op)).count();
         if count == 0 {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
-            return None;
+            return Compiled::Unsupported;
         }
         let insns = &insns[..count];
         let start = Instant::now();
@@ -354,26 +365,20 @@ impl Compiler {
         t.b.finalize(self.isa.frontend_config());
         let code = match self.emit() {
             Ok(code) => code,
-            Err(e) => {
-                // A full cache simply stops compilation; everything keeps running interpreted.
-                if self.stats.rejected.fetch_add(1, Ordering::Relaxed) == 0 {
-                    eprintln!("rust-v: JIT: {e}");
-                }
-                return None;
-            }
+            Err(_) => return Compiled::CacheFull,
         };
 
         self.stats.blocks.fetch_add(1, Ordering::Relaxed);
         self.stats.instructions.fetch_add(insns.len() as u64, Ordering::Relaxed);
         self.stats.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        Some(code as JitCode)
+        Compiled::Code(code as JitCode)
     }
 }
 
 /// A request to the background compiler thread.
-struct Request {
-    insns: Box<[Insn]>,
-    info: BlockInfo,
+enum Request {
+    Compile { insns: Box<[Insn]>, info: BlockInfo },
+    Reset,
 }
 
 /// Compiles on a dedicated thread, so that the hart keeps interpreting a hot block until its
@@ -387,6 +392,10 @@ pub struct ThreadedCompiler {
 
 impl ThreadedCompiler {
     pub fn new(name: &str) -> Result<Self, String> {
+        Self::with_cache_size(name, CODE_CACHE_SIZE)
+    }
+
+    pub fn with_cache_size(name: &str, cache_size: usize) -> Result<Self, String> {
         let (requests, rx_requests) = std::sync::mpsc::channel::<Request>();
         let (tx_results, results) = std::sync::mpsc::channel();
         let (tx_init, rx_init) = std::sync::mpsc::channel();
@@ -394,7 +403,7 @@ impl ThreadedCompiler {
             .name(name.into())
             .spawn(move || {
                 // The Cranelift module is created and used only on this thread.
-                let mut compiler = match Compiler::new() {
+                let mut compiler = match Compiler::with_cache_size(cache_size) {
                     Ok(c) => c,
                     Err(e) => {
                         let _ = tx_init.send(Err(e));
@@ -404,9 +413,14 @@ impl ThreadedCompiler {
                 let _ = tx_init.send(Ok((compiler.entry, compiler.stats())));
                 // Runs until the hart (and with it the request sender) goes away.
                 while let Ok(req) = rx_requests.recv() {
-                    let result = compiler.compile(&req.insns, req.info);
-                    if tx_results.send((req.info, result)).is_err() {
-                        break;
+                    match req {
+                        Request::Compile { insns, info } => {
+                            let result = compiler.compile(&insns, info);
+                            if tx_results.send((info, result)).is_err() {
+                                break;
+                            }
+                        }
+                        Request::Reset => compiler.reset(),
                     }
                 }
             })
@@ -422,7 +436,7 @@ impl ThreadedCompiler {
 
 impl BlockCompiler for ThreadedCompiler {
     fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
-        match self.requests.send(Request { insns: insns.into(), info }) {
+        match self.requests.send(Request::Compile { insns: insns.into(), info }) {
             Ok(()) => Compiled::Pending,
             Err(_) => Compiled::Unsupported,
         }
@@ -430,6 +444,10 @@ impl BlockCompiler for ThreadedCompiler {
 
     fn poll(&mut self) -> Option<(BlockInfo, Compiled)> {
         self.results.try_recv().ok()
+    }
+
+    fn reset(&mut self) {
+        let _ = self.requests.send(Request::Reset);
     }
 
     fn entry(&self) -> JitEntry {
