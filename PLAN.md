@@ -4,6 +4,15 @@ Goal: a cross-platform (macOS / Linux / Windows; x86-64 and AArch64 hosts) emula
 of a 4-core RISC-V RVA23 machine that boots the latest Ubuntu Desktop (RISC-V) and
 is fast enough to use GNOME and a web browser.
 
+## Status
+
+| Phase | State |
+|---|---|
+| 0: Foundations | ✅ workspace, CI matrix, riscv-tests build |
+| 1: Single-hart interpreter | ✅ RV64IMAC + M/S/U, Sv39/48/57, all 198 rv64 ui/um/ua/uc/mi/si riscv-tests pass. Spike lockstep and PMP enforcement still to do |
+| 2: Board + Linux boot | ✅ OpenSBI 1.6 + Linux 6.12 boot to an init shell in ~1.7 s; decode cache (98 → 199 MIPS); GDB stub. The shell is a freestanding mini-init until F/D land (Debian userland is hard-float) |
+| 2.5: JIT spike | next |
+
 ---
 
 ## 1. Key technical decisions
