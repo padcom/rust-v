@@ -592,6 +592,7 @@ name = "rv-core"
 version = "0.1.0"
 dependencies = [
  "rv-isa",
+ "rv-softfloat",
 ]
 
 [[package]]

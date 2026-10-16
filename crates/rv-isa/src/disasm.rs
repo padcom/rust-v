@@ -36,6 +36,13 @@ impl fmt::Display for Insn {
             Format::Fence => write!(f, "{m} {:#x}, {:#x}", (imm >> 4) & 0xf, imm & 0xf),
             Format::FLoad => write!(f, "{m} f{}, {imm}({rs1})", self.rd),
             Format::FStore => write!(f, "{m} f{}, {imm}({rs1})", self.rs2),
+            Format::FR => write!(f, "{m} f{}, f{}, f{}", self.rd, self.rs1, self.rs2),
+            Format::FR1 => write!(f, "{m} f{}, f{}", self.rd, self.rs1),
+            Format::FR4 => write!(f, "{m} f{}, f{}, f{}, f{}", self.rd, self.rs1, self.rs2, self.rs3),
+            Format::FToX => write!(f, "{m} {rd}, f{}", self.rs1),
+            Format::XToF => write!(f, "{m} f{}, {rs1}", self.rd),
+            Format::FCmp => write!(f, "{m} {rd}, f{}, f{}", self.rs1, self.rs2),
+            Format::FLi => write!(f, "{m} f{}, {}", self.rd, self.rs1),
         }
     }
 }

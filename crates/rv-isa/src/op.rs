@@ -37,6 +37,20 @@ pub enum Format {
     /// `fd, imm(rs1)` / `fs2, imm(rs1)`
     FLoad,
     FStore,
+    /// `fd, fs1, fs2`
+    FR,
+    /// `fd, fs1`
+    FR1,
+    /// `fd, fs1, fs2, fs3`
+    FR4,
+    /// `rd, fs1`
+    FToX,
+    /// `fd, rs1`
+    XToF,
+    /// `rd, fs1, fs2`
+    FCmp,
+    /// `fd, index`
+    FLi,
 }
 
 macro_rules! ops {
@@ -167,12 +181,93 @@ ops! {
     AmominuD => "amominu.d", Amo;
     AmomaxuD => "amomaxu.d", Amo;
 
-    // F/D loads and stores (decoded now so that C.FLD & co. have somewhere to go;
-    // executed once the FPU lands).
+    // F, D, Zfa and Zfhmin. FP ops keep the rounding mode in `imm`, the third source in `rs3`
+    // and the `fli` index in `rs1`.
+    Flh => "flh", FLoad;
     Flw => "flw", FLoad;
     Fld => "fld", FLoad;
+    Fsh => "fsh", FStore;
     Fsw => "fsw", FStore;
     Fsd => "fsd", FStore;
+    FaddS => "fadd.s", FR;
+    FsubS => "fsub.s", FR;
+    FmulS => "fmul.s", FR;
+    FdivS => "fdiv.s", FR;
+    FsqrtS => "fsqrt.s", FR1;
+    FsgnjS => "fsgnj.s", FR;
+    FsgnjnS => "fsgnjn.s", FR;
+    FsgnjxS => "fsgnjx.s", FR;
+    FminS => "fmin.s", FR;
+    FmaxS => "fmax.s", FR;
+    FminmS => "fminm.s", FR;
+    FmaxmS => "fmaxm.s", FR;
+    FeqS => "feq.s", FCmp;
+    FltS => "flt.s", FCmp;
+    FleS => "fle.s", FCmp;
+    FltqS => "fltq.s", FCmp;
+    FleqS => "fleq.s", FCmp;
+    FclassS => "fclass.s", FToX;
+    FmaddS => "fmadd.s", FR4;
+    FmsubS => "fmsub.s", FR4;
+    FnmsubS => "fnmsub.s", FR4;
+    FnmaddS => "fnmadd.s", FR4;
+    FliS => "fli.s", FLi;
+    FroundS => "fround.s", FR1;
+    FroundnxS => "froundnx.s", FR1;
+    FcvtWS => "fcvt.w.s", FToX;
+    FcvtWuS => "fcvt.wu.s", FToX;
+    FcvtLS => "fcvt.l.s", FToX;
+    FcvtLuS => "fcvt.lu.s", FToX;
+    FcvtSW => "fcvt.s.w", XToF;
+    FcvtSWu => "fcvt.s.wu", XToF;
+    FcvtSL => "fcvt.s.l", XToF;
+    FcvtSLu => "fcvt.s.lu", XToF;
+    FaddD => "fadd.d", FR;
+    FsubD => "fsub.d", FR;
+    FmulD => "fmul.d", FR;
+    FdivD => "fdiv.d", FR;
+    FsqrtD => "fsqrt.d", FR1;
+    FsgnjD => "fsgnj.d", FR;
+    FsgnjnD => "fsgnjn.d", FR;
+    FsgnjxD => "fsgnjx.d", FR;
+    FminD => "fmin.d", FR;
+    FmaxD => "fmax.d", FR;
+    FminmD => "fminm.d", FR;
+    FmaxmD => "fmaxm.d", FR;
+    FeqD => "feq.d", FCmp;
+    FltD => "flt.d", FCmp;
+    FleD => "fle.d", FCmp;
+    FltqD => "fltq.d", FCmp;
+    FleqD => "fleq.d", FCmp;
+    FclassD => "fclass.d", FToX;
+    FmaddD => "fmadd.d", FR4;
+    FmsubD => "fmsub.d", FR4;
+    FnmsubD => "fnmsub.d", FR4;
+    FnmaddD => "fnmadd.d", FR4;
+    FliD => "fli.d", FLi;
+    FroundD => "fround.d", FR1;
+    FroundnxD => "froundnx.d", FR1;
+    FcvtWD => "fcvt.w.d", FToX;
+    FcvtWuD => "fcvt.wu.d", FToX;
+    FcvtLD => "fcvt.l.d", FToX;
+    FcvtLuD => "fcvt.lu.d", FToX;
+    FcvtDW => "fcvt.d.w", XToF;
+    FcvtDWu => "fcvt.d.wu", XToF;
+    FcvtDL => "fcvt.d.l", XToF;
+    FcvtDLu => "fcvt.d.lu", XToF;
+    FmvXW => "fmv.x.w", FToX;
+    FmvWX => "fmv.w.x", XToF;
+    FmvXD => "fmv.x.d", FToX;
+    FmvDX => "fmv.d.x", XToF;
+    FmvXH => "fmv.x.h", FToX;
+    FmvHX => "fmv.h.x", XToF;
+    FcvtSD => "fcvt.s.d", FR1;
+    FcvtDS => "fcvt.d.s", FR1;
+    FcvtSH => "fcvt.s.h", FR1;
+    FcvtHS => "fcvt.h.s", FR1;
+    FcvtDH => "fcvt.d.h", FR1;
+    FcvtHD => "fcvt.h.d", FR1;
+    FcvtmodWD => "fcvtmod.w.d", FToX;
 
     // Privileged
     Mret => "mret", None;

@@ -5,6 +5,7 @@ pub mod bus;
 pub mod code;
 pub mod csr;
 mod exec;
+mod fpu;
 pub mod hart;
 pub mod jit;
 pub mod mem;

@@ -105,15 +105,19 @@ fn decode32(raw: u32) -> Insn {
             insn(op, 0, rs1, rs2, imm_s(raw))
         }
         0x07 => match f3 {
+            1 => i(Op::Flh),
             2 => i(Op::Flw),
             3 => i(Op::Fld),
             _ => illegal,
         },
         0x27 => match f3 {
+            1 => insn(Op::Fsh, 0, rs1, rs2, imm_s(raw)),
             2 => insn(Op::Fsw, 0, rs1, rs2, imm_s(raw)),
             3 => insn(Op::Fsd, 0, rs1, rs2, imm_s(raw)),
             _ => illegal,
         },
+        0x43 | 0x47 | 0x4b | 0x4f => decode_fma(raw, rd, rs1, rs2, f3),
+        0x53 => decode_fp(raw, rd, rs1, rs2, f3),
         0x13 => {
             let shamt = bits(raw, 25, 20) as i32;
             match f3 {
@@ -212,6 +216,109 @@ fn decode_system(raw: u32, rd: u8, rs1: u8, rs2: u8, f3: u32, f7: u32) -> Insn {
         6 => insn(Op::Csrrsi, rd, rs1, 0, csr),
         7 => insn(Op::Csrrci, rd, rs1, 0, csr),
         _ => Insn::illegal(raw, 4),
+    }
+}
+
+fn decode_fma(raw: u32, rd: u8, rs1: u8, rs2: u8, rm: u32) -> Insn {
+    let double = match bits(raw, 26, 25) {
+        0 => false,
+        1 => true,
+        _ => return Insn::illegal(raw, 4),
+    };
+    let op = match (bits(raw, 6, 0), double) {
+        (0x43, false) => Op::FmaddS,
+        (0x47, false) => Op::FmsubS,
+        (0x4b, false) => Op::FnmsubS,
+        (0x4f, false) => Op::FnmaddS,
+        (0x43, true) => Op::FmaddD,
+        (0x47, true) => Op::FmsubD,
+        (0x4b, true) => Op::FnmsubD,
+        _ => Op::FnmaddD,
+    };
+    Insn { op, rd, rs1, rs2, rs3: bits(raw, 31, 27) as u8, len: 4, imm: rm as i32, raw }
+}
+
+fn decode_fp(raw: u32, rd: u8, rs1: u8, rs2: u8, rm: u32) -> Insn {
+    use Op::*;
+    let fmt = bits(raw, 26, 25);
+    // Most operations exist for single (fmt 0) and double (fmt 1) precision only.
+    let sd = |s: Op, d: Op| match fmt {
+        0 => Some(s),
+        1 => Some(d),
+        _ => None,
+    };
+    let op = match bits(raw, 31, 27) {
+        0x00 => sd(FaddS, FaddD),
+        0x01 => sd(FsubS, FsubD),
+        0x02 => sd(FmulS, FmulD),
+        0x03 => sd(FdivS, FdivD),
+        0x0b if rs2 == 0 => sd(FsqrtS, FsqrtD),
+        0x04 => match rm {
+            0 => sd(FsgnjS, FsgnjD),
+            1 => sd(FsgnjnS, FsgnjnD),
+            2 => sd(FsgnjxS, FsgnjxD),
+            _ => None,
+        },
+        0x05 => match rm {
+            0 => sd(FminS, FminD),
+            1 => sd(FmaxS, FmaxD),
+            2 => sd(FminmS, FminmD),
+            3 => sd(FmaxmS, FmaxmD),
+            _ => None,
+        },
+        0x08 => match (fmt, rs2) {
+            (0, 1) => Some(FcvtSD),
+            (1, 0) => Some(FcvtDS),
+            (0, 2) => Some(FcvtSH),
+            (2, 0) => Some(FcvtHS),
+            (1, 2) => Some(FcvtDH),
+            (2, 1) => Some(FcvtHD),
+            (_, 4) => sd(FroundS, FroundD),
+            (_, 5) => sd(FroundnxS, FroundnxD),
+            _ => None,
+        },
+        0x14 => match rm {
+            0 => sd(FleS, FleD),
+            1 => sd(FltS, FltD),
+            2 => sd(FeqS, FeqD),
+            4 => sd(FleqS, FleqD),
+            5 => sd(FltqS, FltqD),
+            _ => None,
+        },
+        0x18 => match rs2 {
+            0 => sd(FcvtWS, FcvtWD),
+            1 => sd(FcvtWuS, FcvtWuD),
+            2 => sd(FcvtLS, FcvtLD),
+            3 => sd(FcvtLuS, FcvtLuD),
+            8 if fmt == 1 && rm == 1 => Some(FcvtmodWD),
+            _ => None,
+        },
+        0x1a => match rs2 {
+            0 => sd(FcvtSW, FcvtDW),
+            1 => sd(FcvtSWu, FcvtDWu),
+            2 => sd(FcvtSL, FcvtDL),
+            3 => sd(FcvtSLu, FcvtDLu),
+            _ => None,
+        },
+        0x1c if rs2 == 0 => match (rm, fmt) {
+            (0, 0) => Some(FmvXW),
+            (0, 1) => Some(FmvXD),
+            (0, 2) => Some(FmvXH),
+            (1, _) => sd(FclassS, FclassD),
+            _ => None,
+        },
+        0x1e if rm == 0 => match (rs2, fmt) {
+            (0, 0) => Some(FmvWX),
+            (0, 1) => Some(FmvDX),
+            (0, 2) => Some(FmvHX),
+            (1, _) => sd(FliS, FliD),
+            _ => None,
+        },
+        _ => None,
+    };
+    match op {
+        Some(op) => Insn { op, rd, rs1, rs2, rs3: 0, len: 4, imm: rm as i32, raw },
+        None => Insn::illegal(raw, 4),
     }
 }
 

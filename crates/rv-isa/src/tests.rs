@@ -155,6 +155,58 @@ const VECTORS: &[(u32, &str)] = &[
     (0xbf86, "fsd f1, 504(sp)"),            // c.fsdsp f1, 504(sp)
     (0xdfaa, "sw a0, 252(sp)"),             // c.swsp a0, 252(sp)
     (0xffae, "sd a1, 504(sp)"),             // c.sdsp a1, 504(sp)
+    // F, D, Zfa, Zfhmin
+    (0xffe51087, "flh f1, -2(a0)"),              // flh f1, -2(a0)
+    (0x00259327, "fsh f2, 6(a1)"),               // fsh f2, 6(a1)
+    (0x003170d3, "fadd.s f1, f2, f3"),           // fadd.s f1, f2, f3
+    (0x0bdf1fd3, "fsub.d f31, f30, f29"),        // fsub.d f31, f30, f29, rtz
+    (0x1062f253, "fmul.s f4, f5, f6"),           // fmul.s f4, f5, f6, dyn
+    (0x1a9473d3, "fdiv.d f7, f8, f9"),           // fdiv.d f7, f8, f9
+    (0x5805f553, "fsqrt.s f10, f11"),            // fsqrt.s f10, f11
+    (0x5a05b553, "fsqrt.d f10, f11"),            // fsqrt.d f10, f11, rup
+    (0x203100d3, "fsgnj.s f1, f2, f3"),          // fsgnj.s f1, f2, f3
+    (0x223110d3, "fsgnjn.d f1, f2, f3"),         // fsgnjn.d f1, f2, f3
+    (0x203120d3, "fsgnjx.s f1, f2, f3"),         // fsgnjx.s f1, f2, f3
+    (0x2a3100d3, "fmin.d f1, f2, f3"),           // fmin.d f1, f2, f3
+    (0x283110d3, "fmax.s f1, f2, f3"),           // fmax.s f1, f2, f3
+    (0x283120d3, "fminm.s f1, f2, f3"),          // fminm.s f1, f2, f3
+    (0x2a3130d3, "fmaxm.d f1, f2, f3"),          // fmaxm.d f1, f2, f3
+    (0xa020a553, "feq.s a0, f1, f2"),            // feq.s a0, f1, f2
+    (0xa24195d3, "flt.d a1, f3, f4"),            // flt.d a1, f3, f4
+    (0xa0628653, "fle.s a2, f5, f6"),            // fle.s a2, f5, f6
+    (0xa283d6d3, "fltq.d a3, f7, f8"),           // fltq.d a3, f7, f8
+    (0xa0a4c753, "fleq.s a4, f9, f10"),          // fleq.s a4, f9, f10
+    (0xe20612d3, "fclass.d t0, f12"),            // fclass.d t0, f12
+    (0x203170c3, "fmadd.s f1, f2, f3, f4"),      // fmadd.s f1, f2, f3, f4
+    (0x427302c7, "fmsub.d f5, f6, f7, f8"),      // fmsub.d f5, f6, f7, f8, rne
+    (0x60b574cb, "fnmsub.s f9, f10, f11, f12"),  // fnmsub.s f9, f10, f11, f12
+    (0xfbeefe4f, "fnmadd.d f28, f29, f30, f31"), // fnmadd.d f28, f29, f30, f31
+    (0xf01800d3, "fli.s f1, 16"),                // fli.s f1, 1.0
+    (0xf2108153, "fli.d f2, 1"),                 // fli.d f2, min
+    (0xf21f01d3, "fli.d f3, 30"),                // fli.d f3, inf
+    (0x404170d3, "fround.s f1, f2"),             // fround.s f1, f2
+    (0x425241d3, "froundnx.d f3, f4"),           // froundnx.d f3, f4, rmm
+    (0xc0009553, "fcvt.w.s a0, f1"),             // fcvt.w.s a0, f1, rtz
+    (0xc210f553, "fcvt.wu.d a0, f1"),            // fcvt.wu.d a0, f1
+    (0xc020f553, "fcvt.l.s a0, f1"),             // fcvt.l.s a0, f1
+    (0xc230f553, "fcvt.lu.d a0, f1"),            // fcvt.lu.d a0, f1
+    (0xd00570d3, "fcvt.s.w f1, a0"),             // fcvt.s.w f1, a0
+    (0xd21500d3, "fcvt.d.wu f1, a0"),            // fcvt.d.wu f1, a0
+    (0xd02570d3, "fcvt.s.l f1, a0"),             // fcvt.s.l f1, a0
+    (0xd23570d3, "fcvt.d.lu f1, a0"),            // fcvt.d.lu f1, a0
+    (0xe0008553, "fmv.x.w a0, f1"),              // fmv.x.w a0, f1
+    (0xf00500d3, "fmv.w.x f1, a0"),              // fmv.w.x f1, a0
+    (0xe2008553, "fmv.x.d a0, f1"),              // fmv.x.d a0, f1
+    (0xf20500d3, "fmv.d.x f1, a0"),              // fmv.d.x f1, a0
+    (0xe4008553, "fmv.x.h a0, f1"),              // fmv.x.h a0, f1
+    (0xf40500d3, "fmv.h.x f1, a0"),              // fmv.h.x f1, a0
+    (0x401170d3, "fcvt.s.d f1, f2"),             // fcvt.s.d f1, f2
+    (0x420100d3, "fcvt.d.s f1, f2"),             // fcvt.d.s f1, f2
+    (0x402100d3, "fcvt.s.h f1, f2"),             // fcvt.s.h f1, f2
+    (0x440170d3, "fcvt.h.s f1, f2"),             // fcvt.h.s f1, f2
+    (0x422100d3, "fcvt.d.h f1, f2"),             // fcvt.d.h f1, f2
+    (0x441170d3, "fcvt.h.d f1, f2"),             // fcvt.h.d f1, f2
+    (0xc2809553, "fcvtmod.w.d a0, f1"),          // fcvtmod.w.d a0, f1, rtz
 ];
 
 #[test]

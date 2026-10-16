@@ -80,6 +80,8 @@ pub struct Csrs {
     pub satp: u64,
     pub mcycle: u64,
     pub minstret: u64,
+    /// `frm` in bits 7:5, `fflags` in bits 4:0.
+    pub fcsr: u64,
     pub pmpcfg: [u64; 8],
     pub pmpaddr: [u64; 64],
 }
@@ -110,6 +112,7 @@ impl Default for Csrs {
             satp: 0,
             mcycle: 0,
             minstret: 0,
+            fcsr: 0,
             pmpcfg: [0; 8],
             pmpaddr: [0; 64],
         }
@@ -223,6 +226,8 @@ const MISA: u64 = misa::MXL_64
     | misa::ext(b'M')
     | misa::ext(b'A')
     | misa::ext(b'C')
+    | misa::ext(b'D')
+    | misa::ext(b'F')
     | misa::ext(b'S')
     | misa::ext(b'U');
 
@@ -443,6 +448,16 @@ impl Hart {
         let c = &self.state.csr;
         let mip = self.shared.mip.load(Ordering::Relaxed);
         Ok(match csr {
+            csr::FFLAGS | csr::FRM | csr::FCSR => {
+                if !self.fp_enabled() {
+                    return Err(Exception::illegal(raw));
+                }
+                match csr {
+                    csr::FFLAGS => c.fcsr & 0x1f,
+                    csr::FRM => (c.fcsr >> 5) & 7,
+                    _ => c.fcsr & 0xff,
+                }
+            }
             csr::CYCLE | csr::TIME | csr::INSTRET | csr::HPMCOUNTER3..=csr::HPMCOUNTER31 => {
                 if !self.counter_accessible(csr - csr::CYCLE) {
                     return Err(Exception::illegal(raw));
@@ -509,6 +524,14 @@ impl Hart {
     pub(crate) fn csr_write(&mut self, csr: u16, value: u64) {
         let c = &mut self.state.csr;
         match csr {
+            csr::FFLAGS | csr::FRM | csr::FCSR => {
+                c.fcsr = match csr {
+                    csr::FFLAGS => (c.fcsr & !0x1f) | (value & 0x1f),
+                    csr::FRM => (c.fcsr & !0xe0) | ((value & 7) << 5),
+                    _ => value & 0xff,
+                };
+                c.mstatus |= status::FS;
+            }
             csr::SSTATUS => {
                 let merged = (self.state.csr.mstatus & !status::S_WRITABLE) | (value & status::S_WRITABLE);
                 self.write_mstatus(merged);

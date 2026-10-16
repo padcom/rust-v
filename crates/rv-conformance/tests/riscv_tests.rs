@@ -13,7 +13,7 @@ use rv_core::{Bus, Hart, HartConfig, HartShared, HostClock};
 const RAM_BASE: u64 = 0x8000_0000;
 const RAM_SIZE: u64 = 32 << 20;
 const MAX_INSNS: u64 = 20_000_000;
-const SUITES: &[&str] = &["rv64ui", "rv64um", "rv64ua", "rv64uc", "rv64mi", "rv64si"];
+const SUITES: &[&str] = &["rv64ui", "rv64um", "rv64ua", "rv64uc", "rv64uf", "rv64ud", "rv64mi", "rv64si"];
 
 /// Outcome of a single test binary.
 #[derive(Debug, PartialEq, Eq)]

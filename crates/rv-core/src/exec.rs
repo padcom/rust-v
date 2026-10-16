@@ -426,8 +426,9 @@ impl Hart {
                 self.state.tlb.flush();
             }
 
-            // The FPU is not implemented yet: misa.F/D are clear and mstatus.FS is off.
-            Op::Flw | Op::Fld | Op::Fsw | Op::Fsd => return Err(Exception::illegal(insn.raw)),
+            Op::Flh | Op::Flw | Op::Fld => self.fp_load(insn, rs1.wrapping_add(imm))?,
+            Op::Fsh | Op::Fsw | Op::Fsd => self.fp_store(insn, rs1.wrapping_add(imm))?,
+            _ => self.execute_fp(insn)?,
         }
         self.state.pc = next;
         Ok(())
