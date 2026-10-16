@@ -1,7 +1,8 @@
 //! Runs the official riscv-tests ISA suite (built by `scripts/build-riscv-tests.sh`).
 //!
+//! Every test runs twice: interpreted, and with the JIT compiling every block on first use.
 //! Ignored by default because it needs the suite to be built first:
-//! `cargo test -p rv-core --release -- --ignored riscv_tests`
+//! `cargo test -p rv-conformance --release -- --ignored`
 //! Set `RISCV_TESTS_FILTER=<substring>` to run a subset.
 
 use std::path::PathBuf;
@@ -32,7 +33,7 @@ fn tests_dir() -> PathBuf {
     }
 }
 
-fn run_test(path: &std::path::Path) -> (Outcome, String) {
+fn run_test(path: &std::path::Path, jit: bool) -> (Outcome, String) {
     let bytes = std::fs::read(path).unwrap();
     let elf = rv_elf::Elf::parse(&bytes).unwrap();
     let tohost = elf.symbol("tohost").unwrap().expect("test has no tohost symbol");
@@ -48,6 +49,10 @@ fn run_test(path: &std::path::Path) -> (Outcome, String) {
         Arc::new(HostClock::new(10_000_000)),
     );
     hart.reset(elf.entry);
+    if jit {
+        hart.compiler = Some(Box::new(rv_jit::Compiler::new().unwrap()));
+        hart.jit_threshold = 1;
+    }
 
     let mut console = String::new();
     let mut executed = 0;
@@ -72,7 +77,17 @@ fn run_test(path: &std::path::Path) -> (Outcome, String) {
 
 #[test]
 #[ignore = "needs scripts/build-riscv-tests.sh"]
-fn riscv_tests() {
+fn riscv_tests_interpreter() {
+    run_suite(false);
+}
+
+#[test]
+#[ignore = "needs scripts/build-riscv-tests.sh"]
+fn riscv_tests_jit() {
+    run_suite(true);
+}
+
+fn run_suite(jit: bool) {
     let dir = tests_dir();
     let filter = std::env::var("RISCV_TESTS_FILTER").unwrap_or_default();
     let mut tests: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -93,11 +108,12 @@ fn riscv_tests() {
     let mut failures = Vec::new();
     for path in &tests {
         let name = path.file_name().unwrap().to_str().unwrap();
-        let (outcome, console) = run_test(path);
+        let (outcome, console) = run_test(path, jit);
         if outcome != Outcome::Pass {
             failures.push(format!("{name}: {outcome:?} {}", console.trim()));
         }
     }
-    println!("{} of {} riscv-tests passed", tests.len() - failures.len(), tests.len());
+    let mode = if jit { "JIT" } else { "interpreter" };
+    println!("{mode}: {} of {} riscv-tests passed", tests.len() - failures.len(), tests.len());
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
 }

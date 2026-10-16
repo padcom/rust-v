@@ -69,6 +69,30 @@ impl Hart {
                 return 1;
             }
         };
+        if self.compiler.is_some() {
+            let data_priv = self.data_priv();
+            let b = self.blocks.block_mut(block);
+            match b.jit {
+                Some((f, p)) if p == data_priv => return self.run_compiled(f),
+                Some(_) => {}
+                None if !b.jit_failed => {
+                    b.hits += 1;
+                    if b.hits >= self.jit_threshold {
+                        let insns = b.insns.clone();
+                        let compiled = self.compiler.as_mut().unwrap().compile(&insns, data_priv);
+                        let b = self.blocks.block_mut(block);
+                        match compiled {
+                            Some(f) => {
+                                b.jit = Some((f, data_priv));
+                                return self.run_compiled(f);
+                            }
+                            None => b.jit_failed = true,
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         let len = self.blocks.block(block).insns.len();
         for i in 0..len {
             let insn = self.blocks.block(block).insns[i];
@@ -109,7 +133,7 @@ impl Hart {
         if insns.is_empty() {
             return Ok(None);
         }
-        Ok(Some(self.blocks.insert(host, Block { insns: insns.into_boxed_slice(), generation })))
+        Ok(Some(self.blocks.insert(host, Block::new(insns.into_boxed_slice(), generation))))
     }
 
     #[inline(always)]

@@ -52,11 +52,24 @@ fn image(name: &str) -> Vec<u8> {
 #[test]
 #[ignore = "needs scripts/build-guest-images.sh"]
 fn boot_linux() {
+    boot(false);
+}
+
+#[test]
+#[ignore = "needs scripts/build-guest-images.sh"]
+fn boot_linux_jit() {
+    boot(true);
+}
+
+fn boot(jit: bool) {
     let console = Capture::default();
     let config = MachineConfig {
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),
+        jit,
+        // Compile aggressively so that as much of the boot as possible runs as native code.
+        jit_threshold: 2,
         ..MachineConfig::default()
     };
     let mut machine = Machine::new(config, Box::new(console.clone())).unwrap();

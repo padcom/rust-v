@@ -13,6 +13,7 @@ rv-isa = { path = "crates/rv-isa" }
 rv-core = { path = "crates/rv-core" }
 rv-elf = { path = "crates/rv-elf" }
 rv-machine = { path = "crates/rv-machine" }
+rv-jit = { path = "crates/rv-jit" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

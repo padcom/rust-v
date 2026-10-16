@@ -8,8 +8,5 @@ license.workspace = true
 [dependencies]
 rv-isa.workspace = true
 
-[dev-dependencies]
-rv-elf.workspace = true
-
 [lints]
 workspace = true

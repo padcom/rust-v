@@ -6,6 +6,7 @@ pub mod code;
 pub mod csr;
 mod exec;
 pub mod hart;
+pub mod jit;
 pub mod mem;
 pub mod mmu;
 pub mod trap;

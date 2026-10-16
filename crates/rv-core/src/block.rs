@@ -11,6 +11,8 @@ use std::hash::{BuildHasherDefault, Hasher};
 
 use rv_isa::{Insn, Op, decode};
 
+use crate::hart::Priv;
+use crate::jit::JitFn;
 use crate::mem::{PAGE_SIZE, host_load};
 
 pub(crate) const MAX_BLOCK_INSNS: usize = 64;
@@ -21,6 +23,18 @@ pub(crate) struct Block {
     pub insns: Box<[Insn]>,
     /// Code generation of the block's page when it was decoded.
     pub generation: u32,
+    /// Times the block has been interpreted; drives compilation.
+    pub hits: u32,
+    /// Native code, compiled for data accesses at `jit_priv`.
+    pub jit: Option<(JitFn, Priv)>,
+    /// Compilation was attempted and failed (unsupported instructions).
+    pub jit_failed: bool,
+}
+
+impl Block {
+    pub fn new(insns: Box<[Insn]>, generation: u32) -> Self {
+        Block { insns, generation, hits: 0, jit: None, jit_failed: false }
+    }
 }
 
 /// Multiplicative hash for pointer keys (SipHash is needlessly slow here).
@@ -58,6 +72,11 @@ impl BlockCache {
     #[inline(always)]
     pub fn block(&self, idx: u32) -> &Block {
         &self.blocks[idx as usize]
+    }
+
+    #[inline(always)]
+    pub fn block_mut(&mut self, idx: u32) -> &mut Block {
+        &mut self.blocks[idx as usize]
     }
 
     pub fn insert(&mut self, host: *const u8, block: Block) -> u32 {

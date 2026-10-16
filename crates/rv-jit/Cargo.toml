@@ -1,0 +1,18 @@
+[package]
+name = "rv-jit"
+description = "Cranelift-based native code generation for RISC-V basic blocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cranelift-codegen = "0.136.3"
+cranelift-frontend = "0.136.3"
+cranelift-jit = "0.136.3"
+cranelift-module = "0.136.3"
+cranelift-native = "0.136.3"
+rv-core.workspace = true
+rv-isa.workspace = true
+
+[lints]
+workspace = true

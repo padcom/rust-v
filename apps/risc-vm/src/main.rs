@@ -28,6 +28,12 @@ struct Args {
     /// Largest supported virtual-memory mode.
     #[arg(long, default_value = "sv48", value_parser = ["sv39", "sv48", "sv57"])]
     mmu: String,
+    /// Compile hot code to native instructions (experimental).
+    #[arg(long)]
+    jit: bool,
+    /// Interpretations of a block before the JIT compiles it.
+    #[arg(long, default_value_t = 16, hide = true)]
+    jit_threshold: u32,
     /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
     #[arg(long, value_name = "[HOST:]PORT")]
     gdb: Option<String>,
@@ -119,6 +125,8 @@ fn run(args: Args) -> Result<Shutdown, String> {
             "sv48" => 9,
             _ => 10,
         },
+        jit: args.jit,
+        jit_threshold: args.jit_threshold,
     };
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {
@@ -148,6 +156,19 @@ fn run(args: Args) -> Result<Shutdown, String> {
             machine.stats.idle.as_secs_f64(),
             insns as f64 / busy / 1e6
         );
+        if let Some(jit) = &machine.jit_stats {
+            use std::sync::atomic::Ordering::Relaxed;
+            let blocks = jit.blocks.load(Relaxed).max(1);
+            eprint!(
+                "risc-vm: JIT compiled {} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
+                jit.blocks.load(Relaxed),
+                jit.instructions.load(Relaxed),
+                jit.code_bytes.load(Relaxed) / 1024,
+                jit.rejected.load(Relaxed),
+                jit.nanos.load(Relaxed) as f64 / blocks as f64 / 1e3,
+                jit.nanos.load(Relaxed) as f64 / 1e9,
+            );
+        }
     }
     Ok(reason)
 }

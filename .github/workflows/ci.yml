@@ -34,4 +34,4 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf
       - run: RISCV_PREFIX=riscv64-unknown-elf- scripts/build-riscv-tests.sh
-      - run: cargo test --workspace --release -- --ignored riscv_tests
+      - run: cargo test --release -p rv-conformance -- --ignored

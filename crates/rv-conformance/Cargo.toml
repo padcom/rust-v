@@ -1,0 +1,15 @@
+[package]
+name = "rv-conformance"
+description = "Architecture conformance tests (riscv-tests) for the interpreter and the JIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dev-dependencies]
+rv-core.workspace = true
+rv-elf.workspace = true
+rv-jit.workspace = true
+
+[lints]
+workspace = true

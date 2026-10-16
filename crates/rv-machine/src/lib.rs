@@ -54,6 +54,10 @@ pub struct MachineConfig {
     pub cmdline: String,
     /// Most capable `satp` mode (8 = Sv39, 9 = Sv48, 10 = Sv57).
     pub max_satp_mode: u64,
+    /// Compile hot blocks to native code.
+    pub jit: bool,
+    /// Interpretations of a block before it gets compiled.
+    pub jit_threshold: u32,
 }
 
 impl Default for MachineConfig {
@@ -65,6 +69,8 @@ impl Default for MachineConfig {
             initrd: None,
             cmdline: "console=ttyS0 earlycon=sbi".into(),
             max_satp_mode: rv_core::csr::satp::MODE_SV48,
+            jit: false,
+            jit_threshold: 16,
         }
     }
 }
@@ -79,6 +85,8 @@ pub struct Machine {
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
     pub stats: Stats,
+    /// JIT compilation statistics, when the JIT is enabled.
+    pub jit_stats: Option<Arc<rv_jit::Stats>>,
 }
 
 /// Execution statistics.
@@ -106,6 +114,7 @@ const NEXT_MODE_S: u64 = 1;
 pub enum Error {
     Fdt(vm_fdt::Error),
     Layout(String),
+    Jit(String),
 }
 
 impl std::fmt::Display for Error {
@@ -113,6 +122,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Fdt(e) => write!(f, "device tree generation failed: {e}"),
             Error::Layout(msg) => write!(f, "{msg}"),
+            Error::Jit(msg) => write!(f, "JIT initialization failed: {msg}"),
         }
     }
 }
@@ -194,7 +204,8 @@ impl Machine {
         bus.load_image(info_addr, &info_bytes);
 
         let bus = Arc::new(bus);
-        let harts = shared
+        let mut jit_stats = None;
+        let mut harts: Vec<Hart> = shared
             .iter()
             .enumerate()
             .map(|(id, sh)| {
@@ -208,8 +219,16 @@ impl Machine {
                 hart
             })
             .collect();
+        if config.jit {
+            for hart in &mut harts {
+                let compiler = rv_jit::Compiler::new().map_err(Error::Jit)?;
+                jit_stats = Some(compiler.stats());
+                hart.compiler = Some(Box::new(compiler));
+                hart.jit_threshold = config.jit_threshold;
+            }
+        }
 
-        Ok(Machine { bus, harts, clint, plic, uart, power, dtb, stats: Stats::default() })
+        Ok(Machine { bus, harts, clint, plic, uart, power, dtb, stats: Stats::default(), jit_stats })
     }
 
     /// Runs until the guest powers off or resets the machine.

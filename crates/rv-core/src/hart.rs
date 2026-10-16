@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::block::BlockCache;
 use crate::bus::Bus;
 use crate::csr::{self, misa, satp, status};
+use crate::jit::BlockCompiler;
 use crate::mmu::Tlb;
 use crate::trap::{Exception, INTERRUPT_BIT, cause, irq};
 
@@ -209,6 +210,12 @@ pub struct Hart {
     /// Set when an instruction wrote `minstret` so that its own retirement is not counted.
     pub(crate) suppress_instret: bool,
     pub(crate) blocks: BlockCache,
+    /// Native-code compiler for hot blocks, if enabled.
+    pub compiler: Option<Box<dyn BlockCompiler>>,
+    /// Interpretations of a block before it is handed to the compiler.
+    pub jit_threshold: u32,
+    /// Exception raised inside a compiled block, picked up by `run_compiled`.
+    pub(crate) jit_exception: Option<Exception>,
 }
 
 const MISA: u64 = misa::MXL_64
@@ -253,6 +260,9 @@ impl Hart {
             wfi: false,
             suppress_instret: false,
             blocks: BlockCache::default(),
+            compiler: None,
+            jit_threshold: 16,
+            jit_exception: None,
         }
     }
 
