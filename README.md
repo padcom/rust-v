@@ -1,6 +1,6 @@
 # rust-v
 
-A cross-platform RISC-V system emulator, aiming at a 4-core RVA23 machine that runs Ubuntu
+A cross-platform RISC-V system emulator for a 4-core RVA23 machine, aiming to run Ubuntu
 Desktop. See [PLAN.md](PLAN.md) for the roadmap and current status.
 
 ## Building
@@ -28,6 +28,8 @@ Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful option
 | Option | Meaning |
 |---|---|
 | `-m, --memory 1G` | RAM size |
+| `--smp 4` | number of harts (CPUs), each on its own host thread |
+| `--single-thread` | run all harts round-robin on one thread (reproducible) |
 | `--vlen 256` | vector register length (128, 256 or 512 bits) |
 | `--append "..."` | kernel command line |
 | `--mmu sv39\|sv48\|sv57` | largest virtual-memory mode offered to the guest |

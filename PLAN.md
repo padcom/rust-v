@@ -13,7 +13,8 @@ is fast enough to use GNOME and a web browser.
 | 2: Board + Linux boot | ✅ OpenSBI 1.6 + Linux 6.12 boot to an init shell in ~1.7 s; decode cache (98 → 199 MIPS); GDB stub. The shell is a freestanding mini-init until F/D land (Debian userland is hard-float) |
 | 2.5: JIT spike | ✅ Cranelift block JIT behind `--jit`: CoreMark 666 → 2272 it/s (3.4×), riscv-tests and Linux boot pass under the JIT. Findings and Phase 5 decisions in [docs/jit-spike.md](docs/jit-spike.md): chaining first (68% of hot time is dispatch), compile off-thread (~15 µs per guest instruction) |
 | 3: Full RVA23 ISA | ✅ F/D/Zfa/Zfhmin on a TestFloat-verified softfloat (busybox/glibc userland runs); Zba/Zbb/Zbs/Zicond/Zcb/Zimop/Zcmop/Zawrs/Zicbo*/Svinval; Sstc, Svpbmt, Svnapot, Smstateen/Ssstateen, Smnpm/Ssnpm, Sscofpmf; RVV 1.0 + Zvfh/Zvfhmin/Zvbb (2993/2993 Spike-checked riscv-vector-tests). H deferred to Phase 10 |
-| 4: SMP | next |
+| 4: SMP | ✅ 4 harts on host threads (or round-robin with `--single-thread`); OpenSBI HSM bring-up, IPIs, remote fences; atomics/LR-SC/message-passing litmus and cross-modifying-code tests; Linux reports 4 CPUs and scales 3.9× on a parallel workload |
+| 5: Full JIT | next: block chaining, off-thread compilation, own code cache (see docs/jit-spike.md) |
 
 ---
 
