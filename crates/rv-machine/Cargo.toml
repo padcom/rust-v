@@ -9,6 +9,7 @@ license.workspace = true
 rv-core.workspace = true
 rv-jit.workspace = true
 vm-fdt = "0.3.0"
+getrandom = "0.3"
 
 [lints]
 workspace = true

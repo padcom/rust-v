@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rv_machine::{Machine, MachineConfig, Shutdown};
+use rv_machine::{Drive, Machine, MachineConfig, Shutdown};
 
 /// Console sink that the test can inspect while the machine runs.
 #[derive(Clone, Default)]
@@ -75,7 +75,10 @@ fn rv_jit_cache_default() -> usize {
 
 fn boot(jit: bool, jit_cache_size: usize) {
     let console = Capture::default();
+    let mut disk = vec![0u8; 4 << 20];
+    disk[..16].copy_from_slice(b"RUST-V DISK TEST");
     let config = MachineConfig {
+        drives: vec![Drive { backend: Box::new(disk), read_only: false }],
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),
@@ -116,6 +119,19 @@ fn boot(jit: bool, jit_cache_size: usize) {
     for j in 1..=4 {
         assert!(text.contains(&format!("w{j}=2000")), "worker {j} did not finish");
     }
+    // virtio-blk: read, then write and read back past the page cache.
+    uart.push_input(b"head -c 16 /dev/vda; echo\n");
+    pos = console.wait_for("RUST-V DISK TEST", pos, timeout);
+    uart.push_input(
+        b"echo written-$((1+1)) | dd of=/dev/vda bs=512 seek=8 conv=sync,fsync 2>/dev/null; \
+          echo 3 > /proc/sys/vm/drop_caches; dd if=/dev/vda bs=512 skip=8 count=1 2>/dev/null | head -c 9; echo\n",
+    );
+    pos = console.wait_for("written-2", pos, timeout);
+    // virtio-rng.
+    uart.push_input(
+        b"echo rng-$(cat /sys/class/misc/hw_random/rng_current)-$(head -c 8 /dev/hwrng | wc -c)\n",
+    );
+    pos = console.wait_for("rng-virtio_rng.0-8", pos, timeout);
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 

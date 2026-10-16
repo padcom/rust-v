@@ -12,6 +12,8 @@ pub struct FdtParams<'a> {
     pub mmu_type: &'a str,
     pub cmdline: &'a str,
     pub initrd: Option<(u64, u64)>,
+    /// Base and size of the 64-bit PCIe memory window.
+    pub pcie_mmio_high: (u64, u64),
 }
 
 const PHANDLE_PLIC: u32 = 1;
@@ -150,9 +152,58 @@ pub fn build(p: &FdtParams) -> Result<Vec<u8>, Error> {
         fdt.end_node(node)?;
     }
 
+    pcie(&mut fdt, p)?;
+
     fdt.end_node(soc)?;
     fdt.end_node(root)?;
     fdt.finish()
+}
+
+/// The PCIe host bridge, described like QEMU's `gpex`.
+fn pcie(fdt: &mut FdtWriter, p: &FdtParams) -> Result<(), Error> {
+    use crate::pci::{ECAM_SIZE, NUM_INTX};
+    let node = fdt.begin_node(&format!("pci@{PCIE_ECAM_BASE:x}"))?;
+    fdt.property_string("compatible", "pci-host-ecam-generic")?;
+    fdt.property_string("device_type", "pci")?;
+    fdt.property_u32("#address-cells", 3)?;
+    fdt.property_u32("#size-cells", 2)?;
+    fdt.property_u32("#interrupt-cells", 1)?;
+    fdt.property_u32("linux,pci-domain", 0)?;
+    fdt.property_array_u32("bus-range", &[0, (ECAM_SIZE >> 20) as u32 - 1])?;
+    fdt.property_null("dma-coherent")?;
+    fdt.property_array_u64("reg", &[PCIE_ECAM_BASE, ECAM_SIZE])?;
+    // (PCI space code + PCI address, CPU address, size), with 64-bit values split into cells.
+    let (high_base, high_size) = p.pcie_mmio_high;
+    let ranges: Vec<u32> = [
+        (0x0100_0000, 0, PCIE_PIO_BASE, PCIE_PIO_SIZE),
+        (0x0200_0000, PCIE_MMIO_BASE, PCIE_MMIO_BASE, PCIE_MMIO_SIZE),
+        (0x0300_0000, high_base, high_base, high_size),
+    ]
+    .iter()
+    .flat_map(|&(space, pci, cpu, size)| {
+        [
+            space,
+            (pci >> 32) as u32,
+            pci as u32,
+            (cpu >> 32) as u32,
+            cpu as u32,
+            (size >> 32) as u32,
+            size as u32,
+        ]
+    })
+    .collect();
+    fdt.property_array_u32("ranges", &ranges)?;
+    // INTx swizzling: pin P of slot S arrives on line (S + P) % 4.
+    let mut map = Vec::new();
+    for slot in 0..NUM_INTX {
+        for pin in 0..NUM_INTX {
+            let irq = PCIE_IRQ + (slot + pin) % NUM_INTX;
+            map.extend_from_slice(&[slot << 11, 0, 0, pin + 1, PHANDLE_PLIC, irq]);
+        }
+    }
+    fdt.property_array_u32("interrupt-map", &map)?;
+    fdt.property_array_u32("interrupt-map-mask", &[0x1800, 0, 0, 7])?;
+    fdt.end_node(node)
 }
 
 /// Formats an extension list as an ISA string suffix: single letters first, then `_`-separated
@@ -184,6 +235,7 @@ mod tests {
             mmu_type: "riscv,sv48",
             cmdline: "console=ttyS0",
             initrd: Some((0x9000_0000, 0x9010_0000)),
+            pcie_mmio_high: (0x4_0000_0000, 16 << 30),
         })
         .unwrap();
         assert_eq!(&blob[..4], &[0xd0, 0x0d, 0xfe, 0xed]);

@@ -4,10 +4,12 @@
 pub mod clint;
 pub mod fdt;
 pub mod gdb;
+pub mod pci;
 pub mod plic;
 pub mod power;
 pub mod rtc;
 pub mod uart;
+pub mod virtio;
 
 use std::io::Write;
 use std::sync::Arc;
@@ -23,11 +25,20 @@ pub mod layout {
     pub const RTC_BASE: u64 = 0x0010_1000;
     pub const CLINT_BASE: u64 = 0x0200_0000;
     pub const PLIC_BASE: u64 = 0x0c00_0000;
+    pub const PCIE_PIO_BASE: u64 = 0x0300_0000;
+    pub const PCIE_PIO_SIZE: u64 = 0x1_0000;
     pub const UART_BASE: u64 = 0x1000_0000;
+    pub const PCIE_ECAM_BASE: u64 = 0x3000_0000;
+    pub const PCIE_MMIO_BASE: u64 = 0x4000_0000;
+    pub const PCIE_MMIO_SIZE: u64 = 0x4000_0000;
     pub const RAM_BASE: u64 = 0x8000_0000;
+    /// The 64-bit PCIe window: this size, aligned to its size above the end of RAM.
+    pub const PCIE_MMIO_HIGH_SIZE: u64 = 16 << 30;
 
     pub const UART_IRQ: u32 = 10;
     pub const RTC_IRQ: u32 = 11;
+    /// PCIe INTA..INTD.
+    pub const PCIE_IRQ: u32 = 32;
 
     pub const TIMEBASE_HZ: u64 = 10_000_000;
 
@@ -78,6 +89,16 @@ pub struct MachineConfig {
     pub harts: usize,
     /// Run each hart on its own host thread (otherwise round-robin on one thread).
     pub threaded: bool,
+    /// virtio-blk disks, in PCI slot order.
+    pub drives: Vec<Drive>,
+    /// Add a virtio-rng device.
+    pub rng: bool,
+}
+
+/// A virtio-blk disk.
+pub struct Drive {
+    pub backend: Box<dyn virtio::blk::Backend>,
+    pub read_only: bool,
 }
 
 impl Default for MachineConfig {
@@ -96,6 +117,8 @@ impl Default for MachineConfig {
             vlen: 128,
             harts: 4,
             threaded: true,
+            drives: Vec::new(),
+            rng: true,
         }
     }
 }
@@ -106,6 +129,7 @@ pub struct Machine {
     pub clint: Arc<clint::Clint>,
     pub plic: Arc<plic::Plic>,
     pub uart: Arc<uart::Uart>,
+    pub pci: Arc<pci::PciHost>,
     pub power: Arc<power::PowerState>,
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
@@ -182,6 +206,26 @@ impl Machine {
         bus.add_device(PLIC_BASE, plic::SIZE, plic.clone());
         bus.add_device(UART_BASE, uart::SIZE, uart.clone());
 
+        let pci = pci::PciHost::new(plic.clone(), PCIE_IRQ);
+        let mmio_high = align_up(ram_end, PCIE_MMIO_HIGH_SIZE);
+        bus.add_device(PCIE_PIO_BASE, PCIE_PIO_SIZE, Arc::new(pci::IoWindow));
+        bus.add_device(PCIE_ECAM_BASE, pci::ECAM_SIZE, Arc::new(pci::Ecam(pci.clone())));
+        for (base, size) in [(PCIE_MMIO_BASE, PCIE_MMIO_SIZE), (mmio_high, PCIE_MMIO_HIGH_SIZE)] {
+            bus.add_device(base, size, Arc::new(pci::MemWindow { host: pci.clone(), base }));
+        }
+        let mut virtio_devices: Vec<Box<dyn virtio::VirtioDevice>> = Vec::new();
+        for (i, drive) in config.drives.into_iter().enumerate() {
+            let id = format!("rust-v-disk{i}");
+            virtio_devices.push(Box::new(virtio::blk::Blk::new(drive.backend, drive.read_only, &id)));
+        }
+        if config.rng {
+            virtio_devices.push(Box::new(virtio::rng::Rng::default()));
+        }
+        for device in virtio_devices {
+            let slot = pci.free_slot().ok_or_else(|| Error::Layout("out of PCI slots".into()))?;
+            pci.attach(slot, Arc::new(virtio::VirtioPci::new(device, bus.memory(), pci.intx(slot))));
+        }
+
         // Memory layout: firmware at the bottom, kernel at +2 MiB, initrd in the middle of RAM,
         // device tree and boot info in the top 2 MiB.
         let fits = |what: &str, start: u64, len: u64, limit: u64| {
@@ -223,6 +267,7 @@ impl Machine {
             mmu_type,
             cmdline: &config.cmdline,
             initrd,
+            pcie_mmio_high: (mmio_high, PCIE_MMIO_HIGH_SIZE),
         })
         .map_err(Error::Fdt)?;
         fits("device tree", dtb_addr, dtb.len() as u64, ram_end)?;
@@ -273,6 +318,7 @@ impl Machine {
             clint,
             plic,
             uart,
+            pci,
             power,
             dtb,
             stats: Stats::default(),

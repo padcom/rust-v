@@ -52,6 +52,9 @@ struct Args {
     /// Interpretations of a block before the JIT compiles it.
     #[arg(long, default_value_t = 16, hide = true)]
     jit_threshold: u32,
+    /// Attach a raw disk image as a virtio-blk drive; append `,ro` for read-only. Repeatable.
+    #[arg(long, value_name = "PATH[,ro]")]
+    disk: Vec<String>,
     /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
     #[arg(long, value_name = "[HOST:]PORT")]
     gdb: Option<String>,
@@ -138,6 +141,20 @@ fn spawn_console_input(uart: Arc<rv_machine::uart::Uart>, raw: bool) {
     });
 }
 
+fn open_disk(spec: &str) -> Result<rv_machine::Drive, String> {
+    let (path, read_only) = match spec.strip_suffix(",ro") {
+        Some(path) => (path, true),
+        None => (spec, false),
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(!read_only)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    let backend = rv_machine::virtio::blk::FileBackend::new(file).map_err(|e| format!("{path}: {e}"))?;
+    Ok(rv_machine::Drive { backend: Box::new(backend), read_only })
+}
+
 fn run(args: Args) -> Result<Shutdown, String> {
     let config = MachineConfig {
         ram_size: args.memory,
@@ -157,6 +174,8 @@ fn run(args: Args) -> Result<Shutdown, String> {
         vlen: args.vlen,
         harts: args.smp as usize,
         threaded: !args.single_thread,
+        drives: args.disk.iter().map(|d| open_disk(d)).collect::<Result<_, _>>()?,
+        rng: true,
     };
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {
