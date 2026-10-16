@@ -28,6 +28,12 @@ struct Args {
     /// Largest supported virtual-memory mode.
     #[arg(long, default_value = "sv48", value_parser = ["sv39", "sv48", "sv57"])]
     mmu: String,
+    /// Number of harts (CPUs).
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(u16).range(1..=64))]
+    smp: u16,
+    /// Run all harts on one host thread, round-robin (slower, but reproducible).
+    #[arg(long)]
+    single_thread: bool,
     /// Vector register length in bits (128, 256 or 512).
     #[arg(long, default_value_t = 128, value_parser = parse_vlen)]
     vlen: usize,
@@ -138,6 +144,8 @@ fn run(args: Args) -> Result<Shutdown, String> {
         jit: args.jit,
         jit_threshold: args.jit_threshold,
         vlen: args.vlen,
+        harts: args.smp as usize,
+        threaded: !args.single_thread,
     };
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {

@@ -91,6 +91,18 @@ fn boot(jit: bool) {
         b"awk 'BEGIN { x = 1; for (i = 0; i < 8; i++) x = x / 2 + 1 / x; printf \"x=%.12f\\n\", x }'\n",
     );
     pos = console.wait_for("x=1.414213562373", pos, timeout);
+    // All four harts are online and run work in parallel.
+    uart.push_input(b"echo cpus=$(nproc)\n");
+    pos = console.wait_for("cpus=4", pos, timeout);
+    uart.push_input(
+        b"for j in 1 2 3 4; do (i=0; while [ $i -lt 2000 ]; do i=$((i+1)); done; echo w$j=$i) & done; wait; echo all-$((2+2))\n",
+    );
+    // The marker is computed so that the echoed command line does not match it.
+    pos = console.wait_for("all-4\r\n", pos, timeout);
+    let text = console.text();
+    for j in 1..=4 {
+        assert!(text.contains(&format!("w{j}=2000")), "worker {j} did not finish");
+    }
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 

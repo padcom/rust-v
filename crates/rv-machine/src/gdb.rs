@@ -220,13 +220,15 @@ impl GdbStub {
                 Some(r) => r,
                 None => {
                     // Detached: continue without the debugger.
-                    return Ok(machine.run());
+                    return Ok(machine.run_sequential());
                 }
             };
             let outcome = match resume {
                 Resume::Step => {
-                    machine.harts[0].step();
-                    machine.service(Exit::Budget).map(Err).unwrap_or(Ok(Stop::Trap))
+                    for hart in &mut machine.harts {
+                        hart.step();
+                    }
+                    machine.tick(&[Exit::Budget]).map(Err).unwrap_or(Ok(Stop::Trap))
                 }
                 Resume::Continue => self.continue_until_stop(machine),
             };
@@ -241,29 +243,30 @@ impl GdbStub {
         }
     }
 
+    /// Runs all harts round-robin. Breakpoints and Ctrl-C apply to hart 0, which is the one
+    /// the debugger sees.
     fn continue_until_stop(&mut self, machine: &mut Machine) -> Result<Stop, Shutdown> {
         loop {
             let started = Instant::now();
-            let exit = if self.breakpoints.is_empty() {
-                machine.harts[0].run(SLICE)
+            let exits: Vec<Exit> = if self.breakpoints.is_empty() {
+                machine.harts.iter_mut().map(|h| h.run(SLICE)).collect()
             } else {
-                let hart = &mut machine.harts[0];
-                let mut exit = Exit::Budget;
                 for _ in 0..SLICE {
-                    hart.step();
-                    if self.breakpoints.contains(&hart.state.pc) {
+                    for hart in &mut machine.harts {
+                        hart.step();
+                    }
+                    if self.breakpoints.contains(&machine.harts[0].state.pc) {
                         machine.stats.busy += started.elapsed();
                         return Ok(Stop::Breakpoint);
                     }
-                    if hart.wfi {
-                        exit = Exit::Wfi;
+                    if machine.harts.iter().all(|h| h.wfi) {
                         break;
                     }
                 }
-                exit
+                machine.harts.iter().map(|h| if h.wfi { Exit::Wfi } else { Exit::Budget }).collect()
             };
             machine.stats.busy += started.elapsed();
-            if let Some(shutdown) = machine.service(exit) {
+            if let Some(shutdown) = machine.tick(&exits) {
                 return Err(shutdown);
             }
             if self.conn.interrupted() {

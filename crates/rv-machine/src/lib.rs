@@ -48,6 +48,8 @@ pub const ISA_EXTENSIONS: &[&str] = &[
 
 /// Instructions a hart runs between timer and shutdown checks.
 pub const SLICE: u64 = 20_000;
+/// Most harts a machine can have.
+pub const MAX_HARTS: usize = 64;
 /// Longest a hart sleeps in WFI before re-checking timers.
 const MAX_IDLE: Duration = Duration::from_millis(10);
 
@@ -67,6 +69,10 @@ pub struct MachineConfig {
     pub jit_threshold: u32,
     /// Vector register length in bits.
     pub vlen: usize,
+    /// Number of harts.
+    pub harts: usize,
+    /// Run each hart on its own host thread (otherwise round-robin on one thread).
+    pub threaded: bool,
 }
 
 impl Default for MachineConfig {
@@ -81,6 +87,8 @@ impl Default for MachineConfig {
             jit: false,
             jit_threshold: 16,
             vlen: 128,
+            harts: 4,
+            threaded: true,
         }
     }
 }
@@ -97,6 +105,7 @@ pub struct Machine {
     pub stats: Stats,
     /// JIT compilation statistics, when the JIT is enabled.
     pub jit_stats: Option<Arc<rv_jit::Stats>>,
+    threaded: bool,
 }
 
 /// Execution statistics.
@@ -145,7 +154,10 @@ const fn align_up(v: u64, a: u64) -> u64 {
 
 impl Machine {
     pub fn new(config: MachineConfig, console: Box<dyn Write + Send>) -> Result<Self, Error> {
-        let num_harts = 1;
+        let num_harts = config.harts;
+        if !(1..=MAX_HARTS).contains(&num_harts) {
+            return Err(Error::Layout(format!("unsupported hart count {num_harts} (1 to {MAX_HARTS})")));
+        }
         let ram_size = config.ram_size;
         let ram_end = RAM_BASE + ram_size;
         let time: Arc<dyn TimeSource> = Arc::new(HostClock::new(TIMEBASE_HZ));
@@ -239,24 +251,77 @@ impl Machine {
             }
         }
 
-        Ok(Machine { bus, harts, clint, plic, uart, power, dtb, stats: Stats::default(), jit_stats })
+        Ok(Machine {
+            bus,
+            harts,
+            clint,
+            plic,
+            uart,
+            power,
+            dtb,
+            stats: Stats::default(),
+            jit_stats,
+            threaded: config.threaded,
+        })
     }
 
-    /// Runs until the guest powers off or resets the machine.
+    /// Runs until the guest powers off or resets the machine: each hart on its own host thread,
+    /// or all of them round-robin on the calling thread if `config.threaded` was off.
     pub fn run(&mut self) -> Shutdown {
+        if !self.threaded || self.harts.len() == 1 {
+            return self.run_sequential();
+        }
+        let (clint, power) = (&*self.clint, &*self.power);
+        let per_hart: Vec<Stats> = std::thread::scope(|scope| {
+            let threads: Vec<_> = self
+                .harts
+                .iter_mut()
+                .enumerate()
+                .map(|(id, hart)| {
+                    std::thread::Builder::new()
+                        .name(format!("hart{id}"))
+                        .spawn_scoped(scope, move || {
+                            let mut stats = Stats::default();
+                            loop {
+                                let started = Instant::now();
+                                let exit = hart.run(SLICE);
+                                stats.busy += started.elapsed();
+                                if service_hart(clint, power, id, hart, exit == Exit::Wfi, &mut stats) {
+                                    return stats;
+                                }
+                            }
+                        })
+                        .expect("failed to spawn a hart thread")
+                })
+                .collect();
+            threads.into_iter().map(|t| t.join().expect("hart thread panicked")).collect()
+        });
+        for s in per_hart {
+            self.stats.busy += s.busy;
+            self.stats.idle += s.idle;
+        }
+        self.power.reason().expect("hart threads only stop on shutdown")
+    }
+
+    /// Runs every hart in turn on the calling thread. Deterministic apart from timer interrupts,
+    /// which follow the host clock.
+    pub fn run_sequential(&mut self) -> Shutdown {
         loop {
-            let started = Instant::now();
-            let exit = self.harts[0].run(SLICE);
-            self.stats.busy += started.elapsed();
-            if let Some(reason) = self.service(exit) {
+            let mut exits = Vec::with_capacity(self.harts.len());
+            for hart in &mut self.harts {
+                let started = Instant::now();
+                exits.push(hart.run(SLICE));
+                self.stats.busy += started.elapsed();
+            }
+            if let Some(reason) = self.tick(&exits) {
                 return reason;
             }
         }
     }
 
-    /// Housekeeping between slices of guest execution: timers, shutdown requests and idling
-    /// in WFI (for at most `MAX_IDLE`).
-    pub fn service(&mut self, exit: Exit) -> Option<Shutdown> {
+    /// Housekeeping after every hart ran a slice in sequential mode: timers, shutdown requests,
+    /// and idling (for at most `MAX_IDLE`) when every hart is waiting in WFI.
+    pub fn tick(&mut self, exits: &[Exit]) -> Option<Shutdown> {
         self.clint.update_timers();
         for hart in &mut self.harts {
             hart.update_timer_interrupts();
@@ -264,23 +329,52 @@ impl Machine {
         if let Some(reason) = self.power.reason() {
             return Some(reason);
         }
-        if exit == Exit::Wfi {
-            let hart = &self.harts[0];
-            let now = hart.mtime();
-            let deadline = self.clint.mtimecmp(0).min(hart.timer_deadline().unwrap_or(u64::MAX));
+        if exits.iter().all(|&e| e == Exit::Wfi) {
+            let now = self.harts[0].mtime();
+            let deadline = (0..self.harts.len())
+                .map(|h| self.clint.mtimecmp(h).min(self.harts[h].timer_deadline().unwrap_or(u64::MAX)))
+                .min()
+                .unwrap_or(u64::MAX);
             if deadline > now {
-                let ticks = deadline - now;
-                let wait =
-                    Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / TIMEBASE_HZ)).min(MAX_IDLE);
                 let started = Instant::now();
-                hart.shared.wait(wait);
+                // Any hart's wake-up also ends the wait, since interrupts kick their target hart.
+                self.harts[0].shared.wait(idle_time(deadline - now));
                 self.stats.idle += started.elapsed();
-            }
-            self.clint.update_timers();
-            for hart in &mut self.harts {
-                hart.update_timer_interrupts();
             }
         }
         None
     }
+}
+
+/// How long to sleep for `ticks` of `mtime`, capped at `MAX_IDLE`.
+fn idle_time(ticks: u64) -> Duration {
+    Duration::from_nanos(ticks.saturating_mul(1_000_000_000 / TIMEBASE_HZ)).min(MAX_IDLE)
+}
+
+/// Per-hart housekeeping in threaded mode. Returns `true` when the machine shuts down.
+fn service_hart(
+    clint: &clint::Clint,
+    power: &power::PowerState,
+    id: usize,
+    hart: &mut Hart,
+    in_wfi: bool,
+    stats: &mut Stats,
+) -> bool {
+    clint.update_timer(id);
+    hart.update_timer_interrupts();
+    if power.reason().is_some() {
+        return true;
+    }
+    if in_wfi {
+        let now = hart.mtime();
+        let deadline = clint.mtimecmp(id).min(hart.timer_deadline().unwrap_or(u64::MAX));
+        if deadline > now {
+            let started = Instant::now();
+            hart.shared.wait(idle_time(deadline - now));
+            stats.idle += started.elapsed();
+        }
+        clint.update_timer(id);
+        hart.update_timer_interrupts();
+    }
+    false
 }

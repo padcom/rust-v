@@ -39,15 +39,20 @@ impl Clint {
         self.mtimecmp[hart].load(Ordering::Relaxed)
     }
 
+    /// Re-evaluates MTIP for one hart.
+    pub fn update_timer(&self, hart: usize) {
+        self.update_timer_at(hart, &self.harts[hart], self.time.mtime());
+    }
+
     /// Re-evaluates MTIP for every hart. Only touches `mip` when the level changes.
     pub fn update_timers(&self) {
         let now = self.time.mtime();
         for (h, shared) in self.harts.iter().enumerate() {
-            self.update_timer(h, shared, now);
+            self.update_timer_at(h, shared, now);
         }
     }
 
-    fn update_timer(&self, hart: usize, shared: &HartShared, now: u64) {
+    fn update_timer_at(&self, hart: usize, shared: &HartShared, now: u64) {
         let pending = now >= self.mtimecmp[hart].load(Ordering::Relaxed);
         let current = shared.mip.load(Ordering::Relaxed) & (1 << irq::MTI) != 0;
         if pending != current {
@@ -84,7 +89,7 @@ impl Device for Clint {
                 let h = ((o - MTIMECMP_BASE) / 8) as usize;
                 let old = self.mtimecmp[h].load(Ordering::Relaxed);
                 self.mtimecmp[h].store(write_part(old, o % 8, size, value), Ordering::Relaxed);
-                self.update_timer(h, &self.harts[h], self.time.mtime());
+                self.update_timer_at(h, &self.harts[h], self.time.mtime());
             }
             // mtime is read-only here: it is derived from the host clock.
             _ => {}
