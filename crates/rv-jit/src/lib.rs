@@ -111,6 +111,50 @@ fn supported(op: Op) -> bool {
             | Remw
             | Remuw
             | Fence
+            | Sh1add
+            | Sh2add
+            | Sh3add
+            | AddUw
+            | Sh1addUw
+            | Sh2addUw
+            | Sh3addUw
+            | SlliUw
+            | Andn
+            | Orn
+            | Xnor
+            | Clz
+            | Clzw
+            | Ctz
+            | Ctzw
+            | Cpop
+            | Cpopw
+            | Max
+            | Maxu
+            | Min
+            | Minu
+            | SextB
+            | SextH
+            | ZextH
+            | Rol
+            | Rolw
+            | Ror
+            | Rori
+            | Roriw
+            | Rorw
+            | OrcB
+            | Rev8
+            | Bclr
+            | Bclri
+            | Bext
+            | Bexti
+            | Binv
+            | Binvi
+            | Bset
+            | Bseti
+            | CzeroEqz
+            | CzeroNez
+            | MopR
+            | MopRr
     )
 }
 
@@ -295,6 +339,29 @@ impl Translator<'_> {
     fn exception_exit(&mut self, index: u64, offset: i64) {
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         self.exit(pc, EXCEPTION | index);
+    }
+
+    fn zext32(&mut self, v: Value) -> Value {
+        let n = self.b.ins().ireduce(I32, v);
+        self.b.ins().uextend(I64, n)
+    }
+
+    /// bclr/bset/binv/bext with the bit index `n` (taken modulo 64).
+    fn bit_op(&mut self, op: Op, rd: u8, a: Value, n: Value) {
+        let n = self.b.ins().band_imm_s(n, 63);
+        let v = if op == Op::Bext {
+            let shifted = self.b.ins().ushr(a, n);
+            self.b.ins().band_imm_s(shifted, 1)
+        } else {
+            let one = self.b.ins().iconst(I64, 1);
+            let bit = self.b.ins().ishl(one, n);
+            match op {
+                Op::Bclr => self.b.ins().band_not(a, bit),
+                Op::Bset => self.b.ins().bor(a, bit),
+                _ => self.b.ins().bxor(a, bit),
+            }
+        };
+        self.set(rd, v);
     }
 
     fn sext32(&mut self, v: Value) -> Value {
@@ -642,6 +709,144 @@ impl Translator<'_> {
             }
             Op::Fence => {
                 self.b.ins().fence();
+            }
+
+            // Zba
+            Op::Sh1add | Op::Sh2add | Op::Sh3add | Op::AddUw | Op::Sh1addUw | Op::Sh2addUw | Op::Sh3addUw => {
+                let a = self.get(insn.rs1);
+                let b = self.get(insn.rs2);
+                let uw = matches!(insn.op, Op::AddUw | Op::Sh1addUw | Op::Sh2addUw | Op::Sh3addUw);
+                let a = if uw { self.zext32(a) } else { a };
+                let shift = match insn.op {
+                    Op::Sh1add | Op::Sh1addUw => 1,
+                    Op::Sh2add | Op::Sh2addUw => 2,
+                    Op::Sh3add | Op::Sh3addUw => 3,
+                    _ => 0,
+                };
+                let a = self.b.ins().ishl_imm_s(a, shift);
+                let v = self.b.ins().iadd(a, b);
+                self.set(rd, v);
+            }
+            Op::SlliUw => {
+                let a = self.get(insn.rs1);
+                let a = self.zext32(a);
+                let v = self.b.ins().ishl_imm_s(a, imm & 63);
+                self.set(rd, v);
+            }
+            // Zbb
+            Op::Andn => binop!(band_not),
+            Op::Orn => binop!(bor_not),
+            Op::Xnor => binop!(bxor_not),
+            Op::Max => binop!(smax),
+            Op::Maxu => binop!(umax),
+            Op::Min => binop!(smin),
+            Op::Minu => binop!(umin),
+            Op::Rol => binop!(rotl),
+            Op::Ror => binop!(rotr),
+            Op::Rori => immop!(rotr_imm_s),
+            Op::Clz | Op::Ctz | Op::Cpop | Op::Rev8 => {
+                let a = self.get(insn.rs1);
+                let v = match insn.op {
+                    Op::Clz => self.b.ins().clz(a),
+                    Op::Ctz => self.b.ins().ctz(a),
+                    Op::Cpop => self.b.ins().popcnt(a),
+                    _ => self.b.ins().bswap(a),
+                };
+                self.set(rd, v);
+            }
+            Op::Clzw | Op::Ctzw | Op::Cpopw => {
+                let a = self.get(insn.rs1);
+                let a = self.b.ins().ireduce(I32, a);
+                let v = match insn.op {
+                    Op::Clzw => self.b.ins().clz(a),
+                    Op::Ctzw => self.b.ins().ctz(a),
+                    _ => self.b.ins().popcnt(a),
+                };
+                let v = self.b.ins().uextend(I64, v);
+                self.set(rd, v);
+            }
+            Op::Rolw | Op::Rorw | Op::Roriw => {
+                let a = self.get(insn.rs1);
+                let a = self.b.ins().ireduce(I32, a);
+                let v = match insn.op {
+                    Op::Rolw => {
+                        let n = self.get(insn.rs2);
+                        let n = self.b.ins().ireduce(I32, n);
+                        self.b.ins().rotl(a, n)
+                    }
+                    Op::Rorw => {
+                        let n = self.get(insn.rs2);
+                        let n = self.b.ins().ireduce(I32, n);
+                        self.b.ins().rotr(a, n)
+                    }
+                    _ => self.b.ins().rotr_imm_s(a, imm & 31),
+                };
+                let v = self.b.ins().sextend(I64, v);
+                self.set(rd, v);
+            }
+            Op::SextB | Op::SextH | Op::ZextH => {
+                let a = self.get(insn.rs1);
+                let v = match insn.op {
+                    Op::SextB => {
+                        let n = self.b.ins().ireduce(I8, a);
+                        self.b.ins().sextend(I64, n)
+                    }
+                    Op::SextH => {
+                        let n = self.b.ins().ireduce(I16, a);
+                        self.b.ins().sextend(I64, n)
+                    }
+                    _ => {
+                        let n = self.b.ins().ireduce(I16, a);
+                        self.b.ins().uextend(I64, n)
+                    }
+                };
+                self.set(rd, v);
+            }
+            Op::OrcB => {
+                // Per byte: 0xff if non-zero. ((x & 0x7f..) + 0x7f..) | x sets each byte's top bit
+                // iff the byte is non-zero; spread that bit over the byte.
+                let a = self.get(insn.rs1);
+                let low7 = self.b.ins().band_imm_s(a, 0x7f7f_7f7f_7f7f_7f7f);
+                let sum = self.b.ins().iadd_imm_s(low7, 0x7f7f_7f7f_7f7f_7f7f);
+                let any = self.b.ins().bor(sum, a);
+                let top = self.b.ins().band_imm_s(any, 0x8080_8080_8080_8080u64 as i64);
+                let ones = self.b.ins().ushr_imm_s(top, 7);
+                let v = self.b.ins().imul_imm_s(ones, 0xff);
+                self.set(rd, v);
+            }
+            // Zbs
+            Op::Bclr | Op::Bset | Op::Binv | Op::Bext => {
+                let a = self.get(insn.rs1);
+                let n = self.get(insn.rs2);
+                self.bit_op(insn.op, rd, a, n);
+            }
+            Op::Bclri | Op::Bseti | Op::Binvi | Op::Bexti => {
+                let a = self.get(insn.rs1);
+                let n = self.b.ins().iconst(I64, imm & 63);
+                let op = match insn.op {
+                    Op::Bclri => Op::Bclr,
+                    Op::Bseti => Op::Bset,
+                    Op::Binvi => Op::Binv,
+                    _ => Op::Bext,
+                };
+                self.bit_op(op, rd, a, n);
+            }
+            // Zicond
+            Op::CzeroEqz | Op::CzeroNez => {
+                let a = self.get(insn.rs1);
+                let c = self.get(insn.rs2);
+                let zero = self.b.ins().iconst(I64, 0);
+                let v = if insn.op == Op::CzeroEqz {
+                    self.b.ins().select(c, a, zero)
+                } else {
+                    self.b.ins().select(c, zero, a)
+                };
+                self.set(rd, v);
+            }
+            // Zimop / Zcmop
+            Op::MopR | Op::MopRr => {
+                let zero = self.b.ins().iconst(I64, 0);
+                self.set(rd, zero);
             }
             op => unreachable!("unsupported op {op:?} reached the translator"),
         }
