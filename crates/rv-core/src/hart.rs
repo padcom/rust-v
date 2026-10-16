@@ -239,6 +239,8 @@ pub struct Hart {
     pub(crate) jit_exception: Option<Exception>,
     /// Pointer-masking length (PMLEN) for data accesses at U, S and M; 0 when disabled.
     pub(crate) pm_len: [u8; 3],
+    /// Incremented by FENCE.I; blocks validated at an older epoch are re-checked.
+    pub(crate) fence_epoch: u32,
 }
 
 const MISA: u64 = misa::MXL_64
@@ -304,6 +306,7 @@ impl Hart {
             jit_threshold: 16,
             jit_exception: None,
             pm_len: [0; 3],
+            fence_epoch: 0,
         }
     }
 

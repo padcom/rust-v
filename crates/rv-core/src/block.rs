@@ -29,11 +29,33 @@ pub(crate) struct Block {
     pub jit: Option<(JitFn, Priv)>,
     /// Compilation was attempted and failed (unsupported instructions).
     pub jit_failed: bool,
+    /// The hart's FENCE.I epoch at which the block was last known to match memory.
+    pub fence_epoch: u32,
 }
 
 impl Block {
-    pub fn new(insns: Box<[Insn]>, generation: u32) -> Self {
-        Block { insns, generation, hits: 0, jit: None, jit_failed: false }
+    pub fn new(insns: Box<[Insn]>, generation: u32, fence_epoch: u32) -> Self {
+        Block { insns, generation, hits: 0, jit: None, jit_failed: false, fence_epoch }
+    }
+
+    /// Whether the instruction bits at `start` still match the decoded block.
+    ///
+    /// # Safety
+    /// `start` must point into guest RAM, with the whole block inside one page.
+    pub unsafe fn matches_memory(&self, start: *const u8) -> bool {
+        let mut off = 0;
+        self.insns.iter().all(|insn| {
+            // SAFETY: the block was decoded from this range.
+            let raw = unsafe {
+                if insn.len == 2 {
+                    host_load(start.add(off), 2) as u32
+                } else {
+                    host_load(start.add(off), 2) as u32 | (host_load(start.add(off + 2), 2) as u32) << 16
+                }
+            };
+            off += insn.len as usize;
+            raw == insn.raw
+        })
     }
 }
 

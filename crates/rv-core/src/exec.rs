@@ -122,7 +122,17 @@ impl Hart {
         if let Some(idx) = self.blocks.get(host)
             && self.blocks.block(idx).generation == self.bus.code().generation(page)
         {
-            return Ok(Some(idx));
+            if self.blocks.block(idx).fence_epoch == self.fence_epoch {
+                return Ok(Some(idx));
+            }
+            // A FENCE.I happened since the block was last validated. Other harts may have
+            // written the page through store-TLB entries that predate it becoming a code
+            // page, so compare the instruction bits.
+            // SAFETY: the block was decoded from `host`, within one page of guest RAM.
+            if unsafe { self.blocks.block(idx).matches_memory(host) } {
+                self.blocks.block_mut(idx).fence_epoch = self.fence_epoch;
+                return Ok(Some(idx));
+            }
         }
         // Mark the page before reading its generation and contents, so that any write from
         // here on is detected.
@@ -137,7 +147,7 @@ impl Hart {
         if insns.is_empty() {
             return Ok(None);
         }
-        Ok(Some(self.blocks.insert(host, Block::new(insns.into_boxed_slice(), generation))))
+        Ok(Some(self.blocks.insert(host, Block::new(insns.into_boxed_slice(), generation, self.fence_epoch))))
     }
 
     #[inline(always)]
@@ -454,9 +464,12 @@ impl Hart {
             }
 
             Op::Fence => fence(Ordering::SeqCst),
-            // Writes to cached code are detected through code-page generations, so there is
-            // nothing to flush; the block simply ends here.
-            Op::FenceI => fence(Ordering::SeqCst),
+            // Writes through the bus or this hart's TLB bump code-page generations. Writes by
+            // other harts may not have, so cached blocks are re-checked lazily against memory.
+            Op::FenceI => {
+                fence(Ordering::SeqCst);
+                self.fence_epoch = self.fence_epoch.wrapping_add(1);
+            }
 
             Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci => {
                 self.exec_csr(insn, rs1)?;
