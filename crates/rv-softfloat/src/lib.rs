@@ -39,6 +39,9 @@ pub enum Rm {
     Rup = 3,
     /// Round to nearest, ties to max magnitude.
     Rmm = 4,
+    /// Round to odd (truncate, then set the lowest bit if inexact). Not selectable through
+    /// `frm`; used by `vfncvt.rod.f.f.w`.
+    Rod = 5,
 }
 
 impl Rm {
@@ -193,6 +196,7 @@ fn round_shift(sig: u128, shift: i32, sign: bool, rm: Rm) -> (u128, bool) {
         Rm::Rtz => false,
         Rm::Rdn => sign && inexact,
         Rm::Rup => !sign && inexact,
+        Rm::Rod => return (q | inexact as u128, inexact),
     };
     (q + up as u128, inexact)
 }
@@ -229,7 +233,7 @@ fn round_pack<F: Format>(sign: bool, exp: i32, sig: u128, rm: Rm, fl: &mut u8) -
         *fl |= OF | NX;
         let to_inf = match rm {
             Rm::Rne | Rm::Rmm => true,
-            Rm::Rtz => false,
+            Rm::Rtz | Rm::Rod => false,
             Rm::Rdn => sign,
             Rm::Rup => !sign,
         };
@@ -516,12 +520,16 @@ pub fn classify<F: Format>(x: u64) -> u64 {
     1 << bit
 }
 
-/// Converts to a `width`-bit (32 or 64) integer. 32-bit results are sign-extended to 64 bits,
-/// as RISC-V stores them in registers. Out-of-range inputs and NaNs saturate and raise NV.
+/// Converts to a `width`-bit (8 to 64) integer. Narrower results are sign-extended to 64 bits
+/// (as RISC-V stores 32-bit results in registers). Out-of-range inputs and NaNs saturate and
+/// raise NV.
 pub fn to_int<F: Format>(x: u64, signed: bool, width: u32, rm: Rm, fl: &mut u8) -> u64 {
     let (min, max): (i128, i128) =
         if signed { (-(1 << (width - 1)), (1 << (width - 1)) - 1) } else { (0, (1 << width) - 1) };
-    let finish = |v: i128| if width == 32 { v as i32 as i64 as u64 } else { v as u64 };
+    let finish = |v: i128| {
+        let shift = 64 - width;
+        (((v as u64) << shift) as i64 >> shift) as u64
+    };
     if is_nan::<F>(x) {
         *fl |= NV;
         return finish(max);

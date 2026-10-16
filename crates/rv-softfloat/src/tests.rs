@@ -194,3 +194,16 @@ fn modular_conversion() {
     assert_eq!(to_i32_modular(f(-3.75), &mut fl), (-3i64) as u64);
     assert_eq!(fl, NX);
 }
+
+#[test]
+fn round_to_odd() {
+    // 1 + 2^-30 is not representable in binary32: truncate and force the lowest bit.
+    let x = f(1.0 + 2f64.powi(-30));
+    let mut fl = 0;
+    assert_eq!(convert::<F64, F32>(x, Rm::Rod, &mut fl), 0x3f80_0001);
+    assert_eq!(fl, NX);
+    assert_eq!(convert::<F64, F32>(f(1.5), Rm::Rod, &mut 0), 1.5f32.to_bits() as u64, "exact stays even");
+    fl = 0;
+    assert_eq!(convert::<F64, F32>(f(1e300), Rm::Rod, &mut fl), f32::MAX.to_bits() as u64);
+    assert_eq!(fl, OF | NX);
+}

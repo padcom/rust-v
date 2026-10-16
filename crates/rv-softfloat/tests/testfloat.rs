@@ -15,6 +15,7 @@ fn rounding(name: &str) -> Rm {
         "min" => Rm::Rdn,
         "max" => Rm::Rup,
         "near_maxMag" => Rm::Rmm,
+        "odd" => Rm::Rod,
         _ => panic!("unknown rounding mode {name}"),
     }
 }
