@@ -52,6 +52,8 @@ pub struct Compiler {
     fctx: FunctionBuilderContext,
     /// Signature of the `jit_load`/`jit_store` helpers (platform calling convention).
     helper_sig: Signature,
+    /// Signature of the `jit_exec` helper.
+    exec_sig: Signature,
     /// Signature of compiled blocks: `(state, hart) -> status`, tail calling convention.
     block_sig: Signature,
     entry: JitEntry,
@@ -211,6 +213,10 @@ impl Compiler {
         ]);
         helper_sig.returns.push(AbiParam::new(I64));
 
+        let mut exec_sig = Signature::new(isa.default_call_conv());
+        exec_sig.params.extend([AbiParam::new(ptr), AbiParam::new(I64), AbiParam::new(I64)]);
+        exec_sig.returns.push(AbiParam::new(I64));
+
         let mut block_sig = Signature::new(CallConv::Tail);
         block_sig.params.extend([AbiParam::new(ptr), AbiParam::new(ptr)]);
         block_sig.returns.push(AbiParam::new(I64));
@@ -221,6 +227,7 @@ impl Compiler {
             ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
             helper_sig,
+            exec_sig,
             block_sig,
             entry: dummy_entry,
             slots: Vec::new(),
@@ -300,7 +307,14 @@ impl BlockCompiler for Compiler {
 impl Compiler {
     fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
         let data_priv = info.data_priv;
-        let count = insns.iter().take_while(|i| supported(i.op)).count();
+        // Instructions the translator does not handle natively run through the interpreter
+        // helper, as long as they cannot change control flow, privilege or translation.
+        let count = insns
+            .iter()
+            .take_while(|i| {
+                supported(i.op) || (i.op != Op::Illegal && rv_core::jit::executable_by_helper(i.op))
+            })
+            .count();
         if count == 0 {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
             return Compiled::Unsupported;
@@ -319,6 +333,7 @@ impl Compiler {
         let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
         let block_sig_ref = b.import_signature(self.block_sig.clone());
         let helper_sig_ref = b.import_signature(self.helper_sig.clone());
+        let exec_sig_ref = b.import_signature(self.exec_sig.clone());
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
@@ -335,6 +350,7 @@ impl Compiler {
             state,
             hart,
             helper_sig_ref,
+            exec_sig_ref,
             scratch,
             trusted,
             guest,
@@ -460,6 +476,7 @@ struct Translator<'a> {
     state: Value,
     hart: Value,
     helper_sig_ref: SigRef,
+    exec_sig_ref: SigRef,
     scratch: cranelift_codegen::ir::StackSlot,
     /// Flags for accesses to `HartState` (aligned, never trap).
     trusted: MemFlagsData,
@@ -665,6 +682,40 @@ impl Translator<'_> {
     fn exception_exit(&mut self, index: u64, offset: i64) {
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         self.exit(pc, index, EXCEPTION);
+    }
+
+    /// Runs `insn` with the interpreter: writes cached registers back, calls `jit_exec`, and
+    /// picks up the destination register afterwards.
+    fn exec_via_helper(&mut self, insn: &Insn, index: u64, offset: i64) {
+        let t = self.trusted;
+        for r in 1..32u8 {
+            if self.dirty & (1 << r) != 0 {
+                let v = self.b.use_var(self.regs[r as usize]);
+                self.b.ins().store(t, v, self.state, reg_offset(r));
+            }
+        }
+        // The cached values now match HartState.
+        self.dirty = 0;
+        let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
+        self.b.ins().store(t, pc, self.state, abi::PC as i32);
+        // SAFETY: `Insn` is plain data of exactly 16 bytes.
+        let [lo, hi] = unsafe { std::mem::transmute::<Insn, [u64; 2]>(*insn) };
+        let helper = self.b.ins().iconst(I64, rv_core::jit::jit_exec as *const () as usize as i64);
+        let lo = self.b.ins().iconst(I64, lo as i64);
+        let hi = self.b.ins().iconst(I64, hi as i64);
+        let call = self.b.ins().call_indirect(self.exec_sig_ref, helper, &[self.hart, lo, hi]);
+        let status = self.b.inst_results(call)[0];
+        let fault = self.b.create_block();
+        let ok = self.b.create_block();
+        self.b.ins().brif(status, fault, &[], ok, &[]);
+        self.b.switch_to_block(fault);
+        self.exception_exit(index, offset);
+        self.b.switch_to_block(ok);
+        // The helper may have written rd (FP compares and moves, AMOs, vsetvl, ...).
+        if insn.rd != 0 {
+            let v = self.b.ins().load(I64, t, self.state, reg_offset(insn.rd));
+            self.b.def_var(self.regs[insn.rd as usize], v);
+        }
     }
 
     fn zext32(&mut self, v: Value) -> Value {
@@ -1180,7 +1231,7 @@ impl Translator<'_> {
                 let zero = self.b.ins().iconst(I64, 0);
                 self.set(rd, zero);
             }
-            op => unreachable!("unsupported op {op:?} reached the translator"),
+            _ => self.exec_via_helper(insn, index, offset),
         }
         false
     }

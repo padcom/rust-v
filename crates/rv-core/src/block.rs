@@ -137,7 +137,7 @@ impl BlockCache {
 }
 
 /// Whether execution must leave the block after `op`.
-pub(crate) fn ends_block(op: Op) -> bool {
+pub fn ends_block(op: Op) -> bool {
     matches!(
         op,
         Op::Illegal

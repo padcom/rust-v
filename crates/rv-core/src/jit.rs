@@ -208,6 +208,30 @@ pub unsafe extern "C" fn jit_load(hart: *mut Hart, addr: u64, size: u64, out: *m
     }
 }
 
+/// Whether compiled code may run `op` by calling [`jit_exec`]: anything that cannot change
+/// control flow, privilege or address translation (those end blocks).
+pub fn executable_by_helper(op: rv_isa::Op) -> bool {
+    !crate::block::ends_block(op)
+}
+
+/// Executes one instruction with the interpreter, for compiled code. The instruction is
+/// passed as the two 64-bit halves of its [`Insn`]; `state.pc` must already point at it.
+/// Returns 0 on success, 1 if it raised an exception (left in `Hart::jit_exception`).
+///
+/// # Safety
+/// `hart` must be the hart executing the block.
+pub unsafe extern "C" fn jit_exec(hart: *mut Hart, lo: u64, hi: u64) -> u64 {
+    // SAFETY: by contract; `Insn` is plain data of exactly 16 bytes.
+    let (hart, insn) = unsafe { (&mut *hart, std::mem::transmute::<[u64; 2], Insn>([lo, hi])) };
+    match hart.execute(&insn) {
+        Ok(()) => 0,
+        Err(e) => {
+            hart.jit_exception = Some(e);
+            1
+        }
+    }
+}
+
 /// Slow-path store for generated code. Returns 0 on success.
 ///
 /// # Safety
