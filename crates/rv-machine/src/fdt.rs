@@ -60,6 +60,10 @@ pub fn build(p: &FdtParams) -> Result<Vec<u8>, Error> {
             p.isa_extensions.iter().map(|s| s.to_string()).collect(),
         )?;
         fdt.property_string("mmu-type", p.mmu_type)?;
+        let block = rv_core::exec::CACHE_BLOCK as u32;
+        fdt.property_u32("riscv,cbom-block-size", block)?;
+        fdt.property_u32("riscv,cbop-block-size", block)?;
+        fdt.property_u32("riscv,cboz-block-size", block)?;
         let intc = fdt.begin_node("interrupt-controller")?;
         fdt.property_u32("#interrupt-cells", 1)?;
         fdt.property_null("interrupt-controller")?;

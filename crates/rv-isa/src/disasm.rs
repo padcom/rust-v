@@ -43,6 +43,8 @@ impl fmt::Display for Insn {
             Format::XToF => write!(f, "{m} f{}, {rs1}", self.rd),
             Format::FCmp => write!(f, "{m} {rd}, f{}, f{}", self.rs1, self.rs2),
             Format::FLi => write!(f, "{m} f{}, {}", self.rd, self.rs1),
+            Format::R1 => write!(f, "{m} {rd}, {rs1}"),
+            Format::Cbo => write!(f, "{m} ({rs1})"),
         }
     }
 }

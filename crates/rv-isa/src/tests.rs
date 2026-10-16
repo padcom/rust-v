@@ -207,6 +207,77 @@ const VECTORS: &[(u32, &str)] = &[
     (0x422100d3, "fcvt.d.h f1, f2"),             // fcvt.d.h f1, f2
     (0x441170d3, "fcvt.h.d f1, f2"),             // fcvt.h.d f1, f2
     (0xc2809553, "fcvtmod.w.d a0, f1"),          // fcvtmod.w.d a0, f1, rtz
+    // Zba, Zbb, Zbs, Zicond, Zimop, Zcmop, Zawrs, Zicbom, Zicboz, Zicbop, Svinval, Zcb
+    (0x20c5a533, "sh1add a0, a1, a2"),    // sh1add a0, a1, a2
+    (0x20c5c533, "sh2add a0, a1, a2"),    // sh2add a0, a1, a2
+    (0x20c5e533, "sh3add a0, a1, a2"),    // sh3add a0, a1, a2
+    (0x08c5853b, "add.uw a0, a1, a2"),    // add.uw a0, a1, a2
+    (0x20c5a53b, "sh1add.uw a0, a1, a2"), // sh1add.uw a0, a1, a2
+    (0x20c5c53b, "sh2add.uw a0, a1, a2"), // sh2add.uw a0, a1, a2
+    (0x20c5e53b, "sh3add.uw a0, a1, a2"), // sh3add.uw a0, a1, a2
+    (0x0bf5951b, "slli.uw a0, a1, 63"),   // slli.uw a0, a1, 63
+    (0x40c5f533, "andn a0, a1, a2"),      // andn a0, a1, a2
+    (0x40c5e533, "orn a0, a1, a2"),       // orn a0, a1, a2
+    (0x40c5c533, "xnor a0, a1, a2"),      // xnor a0, a1, a2
+    (0x60059513, "clz a0, a1"),           // clz a0, a1
+    (0x6005951b, "clzw a0, a1"),          // clzw a0, a1
+    (0x60159513, "ctz a0, a1"),           // ctz a0, a1
+    (0x6015951b, "ctzw a0, a1"),          // ctzw a0, a1
+    (0x60259513, "cpop a0, a1"),          // cpop a0, a1
+    (0x6025951b, "cpopw a0, a1"),         // cpopw a0, a1
+    (0x0ac5e533, "max a0, a1, a2"),       // max a0, a1, a2
+    (0x0ac5f533, "maxu a0, a1, a2"),      // maxu a0, a1, a2
+    (0x0ac5c533, "min a0, a1, a2"),       // min a0, a1, a2
+    (0x0ac5d533, "minu a0, a1, a2"),      // minu a0, a1, a2
+    (0x60459513, "sext.b a0, a1"),        // sext.b a0, a1
+    (0x60559513, "sext.h a0, a1"),        // sext.h a0, a1
+    (0x0805c53b, "zext.h a0, a1"),        // zext.h a0, a1
+    (0x60c59533, "rol a0, a1, a2"),       // rol a0, a1, a2
+    (0x60c5953b, "rolw a0, a1, a2"),      // rolw a0, a1, a2
+    (0x60c5d533, "ror a0, a1, a2"),       // ror a0, a1, a2
+    (0x60c5d53b, "rorw a0, a1, a2"),      // rorw a0, a1, a2
+    (0x63f5d513, "rori a0, a1, 63"),      // rori a0, a1, 63
+    (0x61f5d51b, "roriw a0, a1, 31"),     // roriw a0, a1, 31
+    (0x2875d513, "orc.b a0, a1"),         // orc.b a0, a1
+    (0x6b85d513, "rev8 a0, a1"),          // rev8 a0, a1
+    (0x48c59533, "bclr a0, a1, a2"),      // bclr a0, a1, a2
+    (0x4bf59513, "bclri a0, a1, 63"),     // bclri a0, a1, 63
+    (0x48c5d533, "bext a0, a1, a2"),      // bext a0, a1, a2
+    (0x4a15d513, "bexti a0, a1, 33"),     // bexti a0, a1, 33
+    (0x68c59533, "binv a0, a1, a2"),      // binv a0, a1, a2
+    (0x68159513, "binvi a0, a1, 1"),      // binvi a0, a1, 1
+    (0x28c59533, "bset a0, a1, a2"),      // bset a0, a1, a2
+    (0x2a859513, "bseti a0, a1, 40"),     // bseti a0, a1, 40
+    (0x0ec5d533, "czero.eqz a0, a1, a2"), // czero.eqz a0, a1, a2
+    (0x0ec5f533, "czero.nez a0, a1, a2"), // czero.nez a0, a1, a2
+    (0x81c5c573, "mop.r a0, a1"),         // mop.r.0 a0, a1
+    (0xcdf342f3, "mop.r t0, t1"),         // mop.r.31 t0, t1
+    (0x82c5c573, "mop.rr a0, a1, a2"),    // mop.rr.0 a0, a1, a2
+    (0xcef746f3, "mop.rr a3, a4, a5"),    // mop.rr.7 a3, a4, a5
+    (0x00d00073, "wrs.nto"),              // wrs.nto
+    (0x01d00073, "wrs.sto"),              // wrs.sto
+    (0x0015200f, "cbo.clean (a0)"),       // cbo.clean (a0)
+    (0x0025a00f, "cbo.flush (a1)"),       // cbo.flush (a1)
+    (0x0006200f, "cbo.inval (a2)"),       // cbo.inval (a2)
+    (0x0046a00f, "cbo.zero (a3)"),        // cbo.zero (a3)
+    (0x04156013, "ori zero, a0, 65"),     // prefetch.r 64(a0)
+    (0x16b50073, "sinval.vma a0, a1"),    // sinval.vma a0, a1
+    (0x18000073, "sfence.w.inval"),       // sfence.w.inval
+    (0x18100073, "sfence.inval.ir"),      // sfence.inval.ir
+    (0x81e8, "lbu a0, 3(a1)"),            // c.lbu a0, 3(a1)
+    (0x86b0, "lhu a2, 2(a3)"),            // c.lhu a2, 2(a3)
+    (0x87d8, "lh a4, 0(a5)"),             // c.lh a4, 0(a5)
+    (0x89c8, "sb a0, 1(a1)"),             // c.sb a0, 1(a1)
+    (0x8ca0, "sh s0, 2(s1)"),             // c.sh s0, 2(s1)
+    (0x9d61, "andi a0, a0, 255"),         // c.zext.b a0
+    (0x9de5, "sext.b a1, a1"),            // c.sext.b a1
+    (0x9e69, "zext.h a2, a2"),            // c.zext.h a2
+    (0x9eed, "sext.h a3, a3"),            // c.sext.h a3
+    (0x9f71, "add.uw a4, a4, zero"),      // c.zext.w a4
+    (0x9ff5, "xori a5, a5, -1"),          // c.not a5
+    (0x9c45, "mul s0, s0, s1"),           // c.mul s0, s1
+    (0x6081, "mop.r zero, zero"),         // c.mop.1
+    (0x6781, "mop.r zero, zero"),         // c.mop.15
 ];
 
 #[test]
@@ -229,16 +300,16 @@ fn decodes_known_encodings() {
 #[test]
 fn rejects_reserved_encodings() {
     let reserved: &[u32] = &[
-        0x0000,      // all-zero parcel
-        0xffff_ffff, // all-ones
-        0x6101,      // c.addi16sp with imm=0
-        0x6501,      // c.lui with imm=0
-        0x2001,      // c.addiw with rd=0
-        0x4002,      // c.lwsp with rd=0
-        0x6002,      // c.ldsp with rd=0
-        0x8002,      // c.jr with rs1=0
-        0x8000,      // quadrant 0, funct3=100 (reserved without Zcb)
-        0x9c41,      // c.subw/c.addw space, funct2=10 (reserved without Zcb)
+        0x0000,                                  // all-zero parcel
+        0xffff_ffff,                             // all-ones
+        0x6101,                                  // c.addi16sp with imm=0
+        0x6501,                                  // c.lui with imm=0
+        0x2001,                                  // c.addiw with rd=0
+        0x4002,                                  // c.lwsp with rd=0
+        0x6002,                                  // c.ldsp with rd=0
+        0x8002,                                  // c.jr with rs1=0
+        0x9c00 | (0b11 << 5) | (0b110 << 2) | 1, // Zcb unary space, reserved selector
+        0x8c40,      // quadrant 0, funct3=100, funct3'=011 with bit 6 set (reserved)
         0xfe00_0033, // OP with funct7=0x7f
         0x1050_00f3, // wfi with rd != 0
     ];

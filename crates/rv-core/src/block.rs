@@ -118,6 +118,9 @@ pub(crate) fn ends_block(op: Op) -> bool {
             | Op::Sret
             | Op::Wfi
             | Op::SfenceVma
+            | Op::SinvalVma
+            | Op::SfenceWInval
+            | Op::SfenceInvalIr
             | Op::FenceI
             | Op::Csrrw
             | Op::Csrrs

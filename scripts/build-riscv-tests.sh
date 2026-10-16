@@ -18,7 +18,7 @@ git -C "$DIR" submodule update --init --recursive --quiet
 # -ffreestanding: bare-metal toolchains without newlib (e.g. Homebrew's) lack libc headers;
 # env/v gets the few declarations it needs from scripts/riscv-tests-shim.
 # Build only the suites the emulator currently supports.
-SUITES="rv64ui rv64um rv64ua rv64uc rv64uf rv64ud rv64mi rv64si"
+SUITES="rv64ui rv64um rv64ua rv64uc rv64uf rv64ud rv64uzba rv64uzbb rv64uzbs rv64uzicond rv64mi rv64si rv64mzicbo"
 make -C "$DIR/isa" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)" \
   RISCV_PREFIX="$PREFIX" XLEN=64 \
   RISCV_GCC_OPTS="-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -ffreestanding -isystem $ROOT/scripts/riscv-tests-shim" \

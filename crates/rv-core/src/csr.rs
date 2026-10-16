@@ -96,6 +96,18 @@ pub mod status {
     pub const S_WRITABLE: u64 = SIE | SPIE | SPP | FS | SUM | MXR;
 }
 
+/// `menvcfg` / `senvcfg` fields.
+pub mod envcfg {
+    pub const FIOM: u64 = 1 << 0;
+    /// Low bit of the 2-bit CBIE field: set for both "flush" (01) and "invalidate" (11).
+    pub const CBIE_FLUSH: u64 = 1 << 4;
+    pub const CBIE: u64 = 3 << 4;
+    pub const CBCFE: u64 = 1 << 6;
+    pub const CBZE: u64 = 1 << 7;
+    pub const PBMTE: u64 = 1 << 62;
+    pub const STCE: u64 = 1 << 63;
+}
+
 /// `satp` fields.
 pub mod satp {
     pub const MODE_SHIFT: u32 = 60;

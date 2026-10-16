@@ -37,8 +37,35 @@ pub mod layout {
 use layout::*;
 
 /// Extensions implemented by the hart, as advertised to the guest.
-pub const ISA_EXTENSIONS: &[&str] =
-    &["i", "m", "a", "f", "d", "c", "zicntr", "zicsr", "zifencei", "zihintpause", "zfa", "zfhmin"];
+pub const ISA_EXTENSIONS: &[&str] = &[
+    "i",
+    "m",
+    "a",
+    "f",
+    "d",
+    "c",
+    "zicbom",
+    "zicbop",
+    "zicboz",
+    "zicntr",
+    "zicond",
+    "zicsr",
+    "zifencei",
+    "zihintntl",
+    "zihintpause",
+    "zimop",
+    "zawrs",
+    "zfa",
+    "zfhmin",
+    "zca",
+    "zcb",
+    "zcd",
+    "zcmop",
+    "zba",
+    "zbb",
+    "zbs",
+    "svinval",
+];
 
 /// Instructions a hart runs between timer and shutdown checks.
 pub const SLICE: u64 = 20_000;

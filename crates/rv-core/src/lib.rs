@@ -4,7 +4,7 @@ mod block;
 pub mod bus;
 pub mod code;
 pub mod csr;
-mod exec;
+pub mod exec;
 mod fpu;
 pub mod hart;
 pub mod jit;

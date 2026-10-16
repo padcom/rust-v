@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::block::BlockCache;
 use crate::bus::Bus;
-use crate::csr::{self, misa, satp, status};
+use crate::csr::{self, envcfg, misa, satp, status};
 use crate::jit::BlockCompiler;
 use crate::mmu::Tlb;
 use crate::trap::{Exception, INTERRUPT_BIT, cause, irq};
@@ -237,8 +237,8 @@ const MIE_WRITABLE: u64 =
 const MIDELEG_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI);
 /// All synchronous exceptions except ECALL from M-mode (and reserved causes).
 const MEDELEG_WRITABLE: u64 = 0xb3ff;
-const MENVCFG_WRITABLE: u64 = 1; // FIOM
-const SENVCFG_WRITABLE: u64 = 1; // FIOM
+const MENVCFG_WRITABLE: u64 = envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE;
+const SENVCFG_WRITABLE: u64 = envcfg::FIOM | envcfg::CBIE | envcfg::CBCFE | envcfg::CBZE;
 
 impl Hart {
     pub fn new(
@@ -542,7 +542,7 @@ impl Hart {
             }
             csr::STVEC => c.stvec = legal_tvec(c.stvec, value),
             csr::SCOUNTEREN => c.scounteren = value & 0xffff_ffff,
-            csr::SENVCFG => c.senvcfg = value & SENVCFG_WRITABLE,
+            csr::SENVCFG => c.senvcfg = legal_cbie(value & SENVCFG_WRITABLE),
             csr::SSCRATCH => c.sscratch = value,
             csr::SEPC => c.sepc = value & !1,
             csr::SCAUSE => c.scause = value,
@@ -560,7 +560,7 @@ impl Hart {
             csr::MIE => c.mie = value & MIE_WRITABLE,
             csr::MTVEC => c.mtvec = legal_tvec(c.mtvec, value),
             csr::MCOUNTEREN => c.mcounteren = value & 0xffff_ffff,
-            csr::MENVCFG => c.menvcfg = value & MENVCFG_WRITABLE,
+            csr::MENVCFG => c.menvcfg = legal_cbie(value & MENVCFG_WRITABLE),
             csr::MCOUNTINHIBIT => c.mcountinhibit = value & 0xffff_fffd,
             csr::MSCRATCH => c.mscratch = value,
             csr::MEPC => c.mepc = value & !1,
@@ -613,6 +613,11 @@ impl Hart {
             Priv::Machine => cause::ECALL_M,
         }
     }
+}
+
+/// CBIE is WARL; the reserved value 10 reads back as 00.
+fn legal_cbie(value: u64) -> u64 {
+    if value & envcfg::CBIE == 2 << 4 { value & !envcfg::CBIE } else { value }
 }
 
 /// `xtvec` is WARL: only direct (0) and vectored (1) modes exist; base must be 4-byte aligned.

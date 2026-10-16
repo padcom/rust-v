@@ -120,16 +120,33 @@ fn decode32(raw: u32) -> Insn {
         0x53 => decode_fp(raw, rd, rs1, rs2, f3),
         0x13 => {
             let shamt = bits(raw, 25, 20) as i32;
-            match f3 {
-                0 => i(Op::Addi),
-                2 => i(Op::Slti),
-                3 => i(Op::Sltiu),
-                4 => i(Op::Xori),
-                6 => i(Op::Ori),
-                7 => i(Op::Andi),
-                1 if bits(raw, 31, 26) == 0 => insn(Op::Slli, rd, rs1, 0, shamt),
-                5 if bits(raw, 31, 26) == 0 => insn(Op::Srli, rd, rs1, 0, shamt),
-                5 if bits(raw, 31, 26) == 0x10 => insn(Op::Srai, rd, rs1, 0, shamt),
+            let shift = |op| insn(op, rd, rs1, 0, shamt);
+            let unary = |op| insn(op, rd, rs1, 0, 0);
+            match (f3, bits(raw, 31, 26)) {
+                (0, _) => i(Op::Addi),
+                (2, _) => i(Op::Slti),
+                (3, _) => i(Op::Sltiu),
+                (4, _) => i(Op::Xori),
+                (6, _) => i(Op::Ori),
+                (7, _) => i(Op::Andi),
+                (1, 0x00) => shift(Op::Slli),
+                (1, 0x0a) => shift(Op::Bseti),
+                (1, 0x12) => shift(Op::Bclri),
+                (1, 0x1a) => shift(Op::Binvi),
+                (1, 0x18) => match bits(raw, 25, 20) {
+                    0x00 => unary(Op::Clz),
+                    0x01 => unary(Op::Ctz),
+                    0x02 => unary(Op::Cpop),
+                    0x04 => unary(Op::SextB),
+                    0x05 => unary(Op::SextH),
+                    _ => illegal,
+                },
+                (5, 0x00) => shift(Op::Srli),
+                (5, 0x10) => shift(Op::Srai),
+                (5, 0x12) => shift(Op::Bexti),
+                (5, 0x18) => shift(Op::Rori),
+                (5, _) if bits(raw, 31, 20) == 0x287 => unary(Op::OrcB),
+                (5, _) if bits(raw, 31, 20) == 0x6b8 => unary(Op::Rev8),
                 _ => illegal,
             }
         }
@@ -138,8 +155,16 @@ fn decode32(raw: u32) -> Insn {
             match (f3, f7) {
                 (0, _) => i(Op::Addiw),
                 (1, 0) => insn(Op::Slliw, rd, rs1, 0, shamt),
+                (1, 0x04 | 0x05) => insn(Op::SlliUw, rd, rs1, 0, bits(raw, 25, 20) as i32),
+                (1, 0x30) => match rs2 {
+                    0 => insn(Op::Clzw, rd, rs1, 0, 0),
+                    1 => insn(Op::Ctzw, rd, rs1, 0, 0),
+                    2 => insn(Op::Cpopw, rd, rs1, 0, 0),
+                    _ => illegal,
+                },
                 (5, 0) => insn(Op::Srliw, rd, rs1, 0, shamt),
                 (5, 0x20) => insn(Op::Sraiw, rd, rs1, 0, shamt),
+                (5, 0x30) => insn(Op::Roriw, rd, rs1, 0, shamt),
                 _ => illegal,
             }
         }
@@ -163,6 +188,24 @@ fn decode32(raw: u32) -> Insn {
                 (1, 5) => Op::Divu,
                 (1, 6) => Op::Rem,
                 (1, 7) => Op::Remu,
+                (0x10, 2) => Op::Sh1add,
+                (0x10, 4) => Op::Sh2add,
+                (0x10, 6) => Op::Sh3add,
+                (0x20, 7) => Op::Andn,
+                (0x20, 6) => Op::Orn,
+                (0x20, 4) => Op::Xnor,
+                (0x05, 6) => Op::Max,
+                (0x05, 7) => Op::Maxu,
+                (0x05, 4) => Op::Min,
+                (0x05, 5) => Op::Minu,
+                (0x30, 1) => Op::Rol,
+                (0x30, 5) => Op::Ror,
+                (0x24, 1) => Op::Bclr,
+                (0x24, 5) => Op::Bext,
+                (0x34, 1) => Op::Binv,
+                (0x14, 1) => Op::Bset,
+                (0x07, 5) => Op::CzeroEqz,
+                (0x07, 7) => Op::CzeroNez,
                 _ => return illegal,
             };
             r(op)
@@ -179,6 +222,13 @@ fn decode32(raw: u32) -> Insn {
                 (1, 5) => Op::Divuw,
                 (1, 6) => Op::Remw,
                 (1, 7) => Op::Remuw,
+                (0x04, 0) => Op::AddUw,
+                (0x04, 4) if rs2 == 0 => return insn(Op::ZextH, rd, rs1, 0, 0),
+                (0x10, 2) => Op::Sh1addUw,
+                (0x10, 4) => Op::Sh2addUw,
+                (0x10, 6) => Op::Sh3addUw,
+                (0x30, 1) => Op::Rolw,
+                (0x30, 5) => Op::Rorw,
                 _ => return illegal,
             };
             r(op)
@@ -187,6 +237,13 @@ fn decode32(raw: u32) -> Insn {
             // pred/succ (and fm) live in imm[11:0].
             0 => insn(Op::Fence, 0, 0, 0, bits(raw, 31, 20) as i32),
             1 => insn(Op::FenceI, 0, 0, 0, 0),
+            2 if rd == 0 => match bits(raw, 31, 20) {
+                0 => insn(Op::CboInval, 0, rs1, 0, 0),
+                1 => insn(Op::CboClean, 0, rs1, 0, 0),
+                2 => insn(Op::CboFlush, 0, rs1, 0, 0),
+                4 => insn(Op::CboZero, 0, rs1, 0, 0),
+                _ => illegal,
+            },
             _ => illegal,
         },
         0x73 => decode_system(raw, rd, rs1, rs2, f3, f7),
@@ -205,9 +262,21 @@ fn decode_system(raw: u32, rd: u8, rs1: u8, rs2: u8, f3: u32, f7: u32) -> Insn {
             0x3020_0073 => insn(Op::Mret, 0, 0, 0, 0),
             0x1020_0073 => insn(Op::Sret, 0, 0, 0, 0),
             0x1050_0073 => insn(Op::Wfi, 0, 0, 0, 0),
+            0x00d0_0073 => insn(Op::WrsNto, 0, 0, 0, 0),
+            0x01d0_0073 => insn(Op::WrsSto, 0, 0, 0, 0),
+            0x1800_0073 => insn(Op::SfenceWInval, 0, 0, 0, 0),
+            0x1810_0073 => insn(Op::SfenceInvalIr, 0, 0, 0, 0),
             _ if f7 == 0x09 && rd == 0 => insn(Op::SfenceVma, 0, rs1, rs2, 0),
+            _ if f7 == 0x0b && rd == 0 => insn(Op::SinvalVma, 0, rs1, rs2, 0),
             _ => Insn::illegal(raw, 4),
         },
+        // Zimop: mop.r.n is 1x00xx0111xx, mop.rr.n is 1x00xx1 in bits 31:25.
+        4 if bit(raw, 31) == 1 && bits(raw, 29, 28) == 0 && bit(raw, 25) == 1 => {
+            insn(Op::MopRr, rd, rs1, rs2, 0)
+        }
+        4 if bit(raw, 31) == 1 && bits(raw, 29, 28) == 0 && bits(raw, 25, 22) == 0b0111 => {
+            insn(Op::MopR, rd, rs1, 0, 0)
+        }
         1 => insn(Op::Csrrw, rd, rs1, 0, csr),
         2 => insn(Op::Csrrs, rd, rs1, 0, csr),
         3 => insn(Op::Csrrc, rd, rs1, 0, csr),
@@ -379,6 +448,19 @@ fn decode16(raw16: u16) -> Insn {
         (0, 0b001) => insn(Op::Fld, rd_p, rs1_p, 0, uimm_d),
         (0, 0b010) => insn(Op::Lw, rd_p, rs1_p, 0, uimm_w),
         (0, 0b011) => insn(Op::Ld, rd_p, rs1_p, 0, uimm_d),
+        (0, 0b100) => {
+            // Zcb byte/halfword loads and stores.
+            let b = (bit(raw, 5) << 1 | bit(raw, 6)) as i32;
+            let h = (bit(raw, 5) << 1) as i32;
+            match (bits(raw, 12, 10), bit(raw, 6)) {
+                (0b000, _) => insn(Op::Lbu, rd_p, rs1_p, 0, b),
+                (0b001, 0) => insn(Op::Lhu, rd_p, rs1_p, 0, h),
+                (0b001, 1) => insn(Op::Lh, rd_p, rs1_p, 0, h),
+                (0b010, _) => insn(Op::Sb, 0, rs1_p, rd_p, b),
+                (0b011, 0) => insn(Op::Sh, 0, rs1_p, rd_p, h),
+                _ => illegal,
+            }
+        }
         (0, 0b101) => insn(Op::Fsd, 0, rs1_p, rd_p, uimm_d),
         (0, 0b110) => insn(Op::Sw, 0, rs1_p, rd_p, uimm_w),
         (0, 0b111) => insn(Op::Sd, 0, rs1_p, rd_p, uimm_d),
@@ -405,8 +487,11 @@ fn decode16(raw16: u16) -> Insn {
                 }
                 insn(Op::Addi, 2, 2, 0, sext(v, 10))
             } else {
-                // C.LUI
+                // C.LUI; its reserved imm=0 encodings with odd rd < 16 are Zcmop's c.mop.n.
                 if imm6 == 0 {
+                    if bit(raw, 12) == 0 && rd_full % 2 == 1 && rd_full < 16 {
+                        return insn(Op::MopR, 0, 0, 0, 0);
+                    }
                     return illegal;
                 }
                 insn(Op::Lui, rd_full, 0, 0, imm6 << 12)
@@ -427,6 +512,19 @@ fn decode16(raw16: u16) -> Insn {
                         (0, 0b11) => Op::And,
                         (1, 0b00) => Op::Subw,
                         (1, 0b01) => Op::Addw,
+                        (1, 0b10) => Op::Mul,
+                        (1, 0b11) => {
+                            // Zcb unary operations, selected by bits 4:2.
+                            return match bits(raw, 4, 2) {
+                                0b000 => insn(Op::Andi, rd, rd, 0, 0xff),
+                                0b001 => insn(Op::SextB, rd, rd, 0, 0),
+                                0b010 => insn(Op::ZextH, rd, rd, 0, 0),
+                                0b011 => insn(Op::SextH, rd, rd, 0, 0),
+                                0b100 => insn(Op::AddUw, rd, rd, 0, 0),
+                                0b101 => insn(Op::Xori, rd, rd, 0, -1),
+                                _ => illegal,
+                            };
+                        }
                         _ => return illegal,
                     };
                     insn(op, rd, rd, rs2, 0)

@@ -51,6 +51,10 @@ pub enum Format {
     FCmp,
     /// `fd, index`
     FLi,
+    /// `rd, rs1`
+    R1,
+    /// `(rs1)`
+    Cbo,
 }
 
 macro_rules! ops {
@@ -268,6 +272,75 @@ ops! {
     FcvtDH => "fcvt.d.h", FR1;
     FcvtHD => "fcvt.h.d", FR1;
     FcvtmodWD => "fcvtmod.w.d", FToX;
+
+    // Zba
+    Sh1add => "sh1add", R;
+    Sh2add => "sh2add", R;
+    Sh3add => "sh3add", R;
+    AddUw => "add.uw", R;
+    Sh1addUw => "sh1add.uw", R;
+    Sh2addUw => "sh2add.uw", R;
+    Sh3addUw => "sh3add.uw", R;
+    SlliUw => "slli.uw", I;
+
+    // Zbb
+    Andn => "andn", R;
+    Orn => "orn", R;
+    Xnor => "xnor", R;
+    Clz => "clz", R1;
+    Clzw => "clzw", R1;
+    Ctz => "ctz", R1;
+    Ctzw => "ctzw", R1;
+    Cpop => "cpop", R1;
+    Cpopw => "cpopw", R1;
+    Max => "max", R;
+    Maxu => "maxu", R;
+    Min => "min", R;
+    Minu => "minu", R;
+    SextB => "sext.b", R1;
+    SextH => "sext.h", R1;
+    ZextH => "zext.h", R1;
+    Rol => "rol", R;
+    Rolw => "rolw", R;
+    Ror => "ror", R;
+    Rori => "rori", I;
+    Roriw => "roriw", I;
+    Rorw => "rorw", R;
+    OrcB => "orc.b", R1;
+    Rev8 => "rev8", R1;
+
+    // Zbs
+    Bclr => "bclr", R;
+    Bclri => "bclri", I;
+    Bext => "bext", R;
+    Bexti => "bexti", I;
+    Binv => "binv", R;
+    Binvi => "binvi", I;
+    Bset => "bset", R;
+    Bseti => "bseti", I;
+
+    // Zicond
+    CzeroEqz => "czero.eqz", R;
+    CzeroNez => "czero.nez", R;
+
+    // Zimop / Zcmop: write zero to rd unless redefined by another extension.
+    MopR => "mop.r", R1;
+    MopRr => "mop.rr", R;
+
+    // Zawrs
+    WrsNto => "wrs.nto", None;
+    WrsSto => "wrs.sto", None;
+
+    // Zicbom / Zicboz
+    CboInval => "cbo.inval", Cbo;
+    CboClean => "cbo.clean", Cbo;
+    CboFlush => "cbo.flush", Cbo;
+    CboZero => "cbo.zero", Cbo;
+
+    // Svinval
+    SinvalVma => "sinval.vma", SfenceVma;
+    SfenceWInval => "sfence.w.inval", None;
+    SfenceInvalIr => "sfence.inval.ir", None;
 
     // Privileged
     Mret => "mret", None;

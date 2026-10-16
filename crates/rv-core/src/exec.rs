@@ -11,6 +11,9 @@ use crate::mem::PAGE_SIZE;
 use crate::mmu::Access;
 use crate::trap::{Exception, cause};
 
+/// Cache-block size for Zicbom/Zicboz/Zicbop (Zic64b).
+pub const CACHE_BLOCK: u64 = 64;
+
 /// Why [`Hart::run`] returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Exit {
@@ -385,6 +388,70 @@ impl Hart {
                 self.set_x(rd, old);
             }
 
+            Op::Sh1add => self.set_x(rd, rs2.wrapping_add(rs1 << 1)),
+            Op::Sh2add => self.set_x(rd, rs2.wrapping_add(rs1 << 2)),
+            Op::Sh3add => self.set_x(rd, rs2.wrapping_add(rs1 << 3)),
+            Op::AddUw => self.set_x(rd, rs2.wrapping_add(rs1 as u32 as u64)),
+            Op::Sh1addUw => self.set_x(rd, rs2.wrapping_add((rs1 as u32 as u64) << 1)),
+            Op::Sh2addUw => self.set_x(rd, rs2.wrapping_add((rs1 as u32 as u64) << 2)),
+            Op::Sh3addUw => self.set_x(rd, rs2.wrapping_add((rs1 as u32 as u64) << 3)),
+            Op::SlliUw => self.set_x(rd, (rs1 as u32 as u64) << (imm & 63)),
+            Op::Andn => self.set_x(rd, rs1 & !rs2),
+            Op::Orn => self.set_x(rd, rs1 | !rs2),
+            Op::Xnor => self.set_x(rd, !(rs1 ^ rs2)),
+            Op::Clz => self.set_x(rd, rs1.leading_zeros() as u64),
+            Op::Clzw => self.set_x(rd, (rs1 as u32).leading_zeros() as u64),
+            Op::Ctz => self.set_x(rd, rs1.trailing_zeros() as u64),
+            Op::Ctzw => self.set_x(rd, (rs1 as u32).trailing_zeros() as u64),
+            Op::Cpop => self.set_x(rd, rs1.count_ones() as u64),
+            Op::Cpopw => self.set_x(rd, (rs1 as u32).count_ones() as u64),
+            Op::Max => self.set_x(rd, (rs1 as i64).max(rs2 as i64) as u64),
+            Op::Maxu => self.set_x(rd, rs1.max(rs2)),
+            Op::Min => self.set_x(rd, (rs1 as i64).min(rs2 as i64) as u64),
+            Op::Minu => self.set_x(rd, rs1.min(rs2)),
+            Op::SextB => self.set_x(rd, rs1 as i8 as u64),
+            Op::SextH => self.set_x(rd, rs1 as i16 as u64),
+            Op::ZextH => self.set_x(rd, rs1 as u16 as u64),
+            Op::Rol => self.set_x(rd, rs1.rotate_left((rs2 & 63) as u32)),
+            Op::Ror => self.set_x(rd, rs1.rotate_right((rs2 & 63) as u32)),
+            Op::Rori => self.set_x(rd, rs1.rotate_right((imm & 63) as u32)),
+            Op::Rolw => self.set_x(rd, (rs1 as u32).rotate_left((rs2 & 31) as u32) as i32 as u64),
+            Op::Rorw => self.set_x(rd, (rs1 as u32).rotate_right((rs2 & 31) as u32) as i32 as u64),
+            Op::Roriw => self.set_x(rd, (rs1 as u32).rotate_right((imm & 31) as u32) as i32 as u64),
+            Op::OrcB => {
+                let v = (0..8).fold(0u64, |acc, i| {
+                    if (rs1 >> (8 * i)) & 0xff != 0 { acc | (0xff << (8 * i)) } else { acc }
+                });
+                self.set_x(rd, v);
+            }
+            Op::Rev8 => self.set_x(rd, rs1.swap_bytes()),
+            Op::Bclr => self.set_x(rd, rs1 & !(1 << (rs2 & 63))),
+            Op::Bclri => self.set_x(rd, rs1 & !(1 << (imm & 63))),
+            Op::Bext => self.set_x(rd, (rs1 >> (rs2 & 63)) & 1),
+            Op::Bexti => self.set_x(rd, (rs1 >> (imm & 63)) & 1),
+            Op::Binv => self.set_x(rd, rs1 ^ (1 << (rs2 & 63))),
+            Op::Binvi => self.set_x(rd, rs1 ^ (1 << (imm & 63))),
+            Op::Bset => self.set_x(rd, rs1 | (1 << (rs2 & 63))),
+            Op::Bseti => self.set_x(rd, rs1 | (1 << (imm & 63))),
+            Op::CzeroEqz => self.set_x(rd, if rs2 == 0 { 0 } else { rs1 }),
+            Op::CzeroNez => self.set_x(rd, if rs2 != 0 { 0 } else { rs1 }),
+            Op::MopR | Op::MopRr => self.set_x(rd, 0),
+            // Waiting is optional: completing immediately is a permitted spurious wake-up.
+            Op::WrsNto | Op::WrsSto => {}
+            Op::CboInval | Op::CboClean | Op::CboFlush | Op::CboZero => self.exec_cbo(insn, rs1)?,
+            Op::SinvalVma => {
+                let p = self.state.privilege;
+                if p == Priv::User || (p == Priv::Supervisor && self.state.csr.mstatus & status::TVM != 0) {
+                    return Err(Exception::illegal(insn.raw));
+                }
+                self.state.tlb.flush();
+            }
+            Op::SfenceWInval | Op::SfenceInvalIr => {
+                if self.state.privilege == Priv::User {
+                    return Err(Exception::illegal(insn.raw));
+                }
+            }
+
             Op::Fence => fence(Ordering::SeqCst),
             // Writes to cached code are detected through code-page generations, so there is
             // nothing to flush; the block simply ends here.
@@ -431,6 +498,46 @@ impl Hart {
             _ => self.execute_fp(insn)?,
         }
         self.state.pc = next;
+        Ok(())
+    }
+
+    /// Zicbom/Zicboz. Caches are not modelled, so only permissions and `cbo.zero` matter.
+    fn exec_cbo(&mut self, insn: &Insn, addr: u64) -> Result<(), Exception> {
+        use crate::csr::envcfg;
+        let (menv, senv) = (self.state.csr.menvcfg, self.state.csr.senvcfg);
+        let enabled = |field: u64| match self.state.privilege {
+            Priv::Machine => true,
+            Priv::Supervisor => menv & field != 0,
+            Priv::User => menv & senv & field != 0,
+        };
+        let allowed = match insn.op {
+            Op::CboZero => enabled(envcfg::CBZE),
+            Op::CboClean | Op::CboFlush => enabled(envcfg::CBCFE),
+            // CBIE = 00 makes cbo.inval illegal; 01 and 11 both allow it.
+            _ => enabled(envcfg::CBIE_FLUSH),
+        };
+        if !allowed {
+            return Err(Exception::illegal(insn.raw));
+        }
+        let p = self.data_priv();
+        let block = addr & !(CACHE_BLOCK - 1);
+        if insn.op == Op::CboZero {
+            let paddr = self.translate(block, Access::Store, p).map_err(|e| Exception::new(e.cause, addr))?;
+            for i in 0..CACHE_BLOCK / 8 {
+                if !self.bus.write(paddr + 8 * i, 8, 0) {
+                    return Err(Exception::new(cause::STORE_ACCESS, addr));
+                }
+            }
+            return Ok(());
+        }
+        // Permitted whenever a load or a store would be; faults are reported as stores.
+        let paddr = self
+            .translate(block, Access::Load, p)
+            .or_else(|_| self.translate(block, Access::Store, p))
+            .map_err(|_| Exception::new(cause::STORE_PAGE_FAULT, addr))?;
+        if self.bus.read(paddr, 1).is_none() {
+            return Err(Exception::new(cause::STORE_ACCESS, addr));
+        }
         Ok(())
     }
 
