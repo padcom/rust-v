@@ -1,4 +1,4 @@
-//! Boots OpenSBI + Linux + the bring-up initramfs built by `scripts/build-guest-images.sh`.
+//! Boots OpenSBI + Linux + the busybox initramfs built by `scripts/build-guest-images.sh`.
 //!
 //! Ignored by default because it needs the guest images:
 //! `cargo test -p rv-machine --release -- --ignored boot_linux`
@@ -79,13 +79,18 @@ fn boot(jit: bool) {
     let timeout = Duration::from_secs(120);
     let mut pos = console.wait_for("OpenSBI v", 0, timeout);
     pos = console.wait_for("Linux version", pos, timeout);
-    pos = console.wait_for("risc-vm init:", pos, timeout);
+    pos = console.wait_for("risc-vm: busybox userland ready", pos, timeout);
     pos = console.wait_for("# ", pos, timeout);
 
     uart.push_input(b"echo hello from the guest\n");
     pos = console.wait_for("hello from the guest\r\n", pos, timeout);
-    uart.push_input(b"cpuinfo\n");
-    pos = console.wait_for("rv64imac", pos, timeout);
+    uart.push_input(b"cat /proc/cpuinfo\n");
+    pos = console.wait_for("rv64imafdc", pos, timeout);
+    // Floating point in userspace: Newton's iteration for sqrt(2), formatted by glibc.
+    uart.push_input(
+        b"awk 'BEGIN { x = 1; for (i = 0; i < 8; i++) x = x / 2 + 1 / x; printf \"x=%.12f\\n\", x }'\n",
+    );
+    pos = console.wait_for("x=1.414213562373", pos, timeout);
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 

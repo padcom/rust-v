@@ -2,7 +2,7 @@
 # Builds the guest images used for bring-up into third_party/guest:
 #   fw_dynamic.bin   OpenSBI (generic platform)
 #   Image            Linux kernel
-#   initramfs.cpio   a minimal freestanding /init (see scripts/guest/init.c)
+#   initramfs.cpio   Debian's static busybox (rv64gc) with a minimal init setup
 #
 # Everything is built inside a Debian container (podman or docker) so it works the same on
 # macOS, Linux and Windows hosts.
@@ -46,9 +46,12 @@ mkdir -p "$OUT/src"
     make -s -C $K ARCH=riscv CROSS_COMPILE=$CROSS -j$JOBS Image
     cp $K/arch/riscv/boot/Image $OUT/
 
-    # ---- initramfs ----
-    ${CROSS}gcc -march=rv64imac_zicsr_zifencei -mabi=lp64 -Os -static -nostdlib -ffreestanding \
-      -fno-builtin -fno-stack-protector -mno-relax -Wl,--no-relax -o /build/init /work/scripts/guest/init.c
+    # ---- initramfs: the statically linked busybox from Debian riscv64 ----
+    dpkg --add-architecture riscv64
+    apt-get update -qq
+    (cd /build && apt-get download -qq busybox-static:riscv64)
+    dpkg-deb -x /build/busybox-static_*_riscv64.deb /build/busybox-root
+    cp /build/busybox-root/usr/bin/busybox /build/busybox 2>/dev/null || cp /build/busybox-root/bin/busybox /build/busybox
     gcc -o /build/gen_init_cpio $K/usr/gen_init_cpio.c
     /build/gen_init_cpio /work/scripts/guest/initramfs.list > $OUT/initramfs.cpio
     ls -l $OUT
