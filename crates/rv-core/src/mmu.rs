@@ -73,7 +73,7 @@ impl Default for Tlb {
 }
 
 #[inline(always)]
-pub(crate) const fn tlb_index(p: Priv) -> usize {
+pub const fn tlb_index(p: Priv) -> usize {
     match p {
         Priv::User => 0,
         Priv::Supervisor => 1,

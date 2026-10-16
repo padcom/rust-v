@@ -146,6 +146,7 @@ pub struct HartState {
     pub privilege: Priv,
     pub csr: Csrs,
     pub tlb: Tlb,
+    pub jit: crate::jit::JitState,
 }
 
 /// The part of a hart that other threads (devices, other harts) touch.
@@ -235,12 +236,12 @@ pub struct Hart {
     pub compiler: Option<Box<dyn BlockCompiler>>,
     /// Interpretations of a block before it is handed to the compiler.
     pub jit_threshold: u32,
+    /// Background compilations not yet installed.
+    pub(crate) jit_pending: usize,
     /// Exception raised inside a compiled block, picked up by `run_compiled`.
     pub(crate) jit_exception: Option<Exception>,
     /// Pointer-masking length (PMLEN) for data accesses at U, S and M; 0 when disabled.
     pub(crate) pm_len: [u8; 3],
-    /// Incremented by FENCE.I; blocks validated at an older epoch are re-checked.
-    pub(crate) fence_epoch: u32,
 }
 
 const MISA: u64 = misa::MXL_64
@@ -291,8 +292,9 @@ impl Hart {
             privilege: Priv::Machine,
             csr: Csrs { misa: MISA, ..Csrs::default() },
             tlb: Tlb::new(),
+            jit: crate::jit::JitState::default(),
         });
-        Hart {
+        let mut hart = Hart {
             state,
             shared,
             bus,
@@ -304,10 +306,12 @@ impl Hart {
             blocks: BlockCache::default(),
             compiler: None,
             jit_threshold: 16,
+            jit_pending: 0,
             jit_exception: None,
             pm_len: [0; 3],
-            fence_epoch: 0,
-        }
+        };
+        hart.state.jit.exit_request = &hart.shared.exit_request as *const AtomicU32 as u64;
+        hart
     }
 
     /// Resets the hart to M-mode at `pc`.
@@ -320,6 +324,7 @@ impl Hart {
         s.privilege = Priv::Machine;
         s.csr = Csrs { misa: MISA, ..Csrs::default() };
         s.tlb.flush();
+        s.jit.jump_cache.fill(Default::default());
         self.reservation = None;
         self.wfi = false;
         self.blocks.clear();
@@ -346,6 +351,8 @@ impl Hart {
 
     /// Enters the trap handler for `cause` (with `INTERRUPT_BIT` set for interrupts).
     pub fn take_trap(&mut self, cause: u64, tval: u64) {
+        // The next block is the handler, not the successor of the last exit.
+        self.state.jit.chain_from = 0;
         let is_interrupt = cause & INTERRUPT_BIT != 0;
         let code = cause & !INTERRUPT_BIT;
         let s = &mut *self.state;

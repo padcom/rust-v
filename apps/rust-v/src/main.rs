@@ -40,6 +40,9 @@ struct Args {
     /// Compile hot code to native instructions (experimental).
     #[arg(long)]
     jit: bool,
+    /// Compile on the hart's own thread instead of a background thread (for comparison).
+    #[arg(long, hide = true)]
+    jit_sync: bool,
     /// Interpretations of a block before the JIT compiles it.
     #[arg(long, default_value_t = 16, hide = true)]
     jit_threshold: u32,
@@ -143,6 +146,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
         },
         jit: args.jit,
         jit_threshold: args.jit_threshold,
+        jit_background: !args.jit_sync,
         vlen: args.vlen,
         harts: args.smp as usize,
         threaded: !args.single_thread,
@@ -175,17 +179,20 @@ fn run(args: Args) -> Result<Shutdown, String> {
             machine.stats.idle.as_secs_f64(),
             insns as f64 / busy / 1e6
         );
-        if let Some(jit) = &machine.jit_stats {
+        if let Some(per_hart) = &machine.jit_stats {
             use std::sync::atomic::Ordering::Relaxed;
-            let blocks = jit.blocks.load(Relaxed).max(1);
+            let sum = |f: fn(&rv_machine::JitStats) -> &std::sync::atomic::AtomicU64| {
+                per_hart.iter().map(|s| f(s).load(Relaxed)).sum::<u64>()
+            };
+            let blocks = sum(|s| &s.blocks);
+            let nanos = sum(|s| &s.nanos);
             eprint!(
-                "rust-v: JIT compiled {} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
-                jit.blocks.load(Relaxed),
-                jit.instructions.load(Relaxed),
-                jit.code_bytes.load(Relaxed) / 1024,
-                jit.rejected.load(Relaxed),
-                jit.nanos.load(Relaxed) as f64 / blocks as f64 / 1e3,
-                jit.nanos.load(Relaxed) as f64 / 1e9,
+                "rust-v: JIT compiled {blocks} blocks ({} instructions, {} KiB code, {} rejected), {:.1} us/block, {:.2}s total\r\n",
+                sum(|s| &s.instructions),
+                sum(|s| &s.code_bytes) / 1024,
+                sum(|s| &s.rejected),
+                nanos as f64 / blocks.max(1) as f64 / 1e3,
+                nanos as f64 / 1e9,
             );
         }
     }

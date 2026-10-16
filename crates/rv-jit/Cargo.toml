@@ -8,11 +8,16 @@ license.workspace = true
 [dependencies]
 cranelift-codegen = "0.136.3"
 cranelift-frontend = "0.136.3"
-cranelift-jit = "0.136.3"
-cranelift-module = "0.136.3"
 cranelift-native = "0.136.3"
 rv-core.workspace = true
 rv-isa.workspace = true
+wasmtime-internal-jit-icache-coherence = "49.0.3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
 
 [lints]
 workspace = true

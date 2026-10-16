@@ -1,26 +1,35 @@
 //! Translates decoded RISC-V basic blocks to native code with Cranelift.
 //!
-//! This is the Phase 2.5 spike: RV64I + M arithmetic, loads/stores with the TLB lookup inlined
-//! and a helper-call slow path, and branches/jumps that end the block. Anything else ends the
-//! compiled prefix of a block; the interpreter takes it from there. There is no block chaining:
-//! every block returns to the dispatcher.
+//! Covers RV64I, M, Zba/Zbb/Zbs and Zicond: loads and stores with the TLB lookup inlined and a
+//! helper-call slow path, and branches/jumps that end the block. Anything else ends the compiled
+//! prefix of a block; the interpreter takes it from there.
+//!
+//! Blocks use Cranelift's `tail` calling convention so that static exits can tail-call their
+//! successor's code through a chain slot (see `rv_core::jit`); a single trampoline in the
+//! platform convention enters the first block of a chain.
+
+mod cache;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cranelift_codegen::Context;
+use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I16, I32, I64};
 use cranelift_codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Type, Value,
+    AbiParam, Function, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData, StackSlotKind, Type,
+    Value,
 };
+use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::TargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use rv_core::Priv;
-use rv_core::jit::{BlockCompiler, EXCEPTION, JitFn, abi, jit_load, jit_store};
+use rv_core::jit::{
+    BlockCompiler, BlockInfo, ChainSlot, Compiled, EXCEPTION, JitCode, JitEntry, abi, jit_load, jit_store,
+};
 use rv_core::mmu::Access;
 use rv_isa::{Insn, Op};
 
@@ -35,13 +44,22 @@ pub struct Stats {
 }
 
 pub struct Compiler {
-    module: JITModule,
+    isa: Arc<dyn TargetIsa>,
+    cache: cache::CodeCache,
     ctx: Context,
     fctx: FunctionBuilderContext,
-    load_fn: FuncId,
-    store_fn: FuncId,
-    next_name: u64,
+    /// Signature of the `jit_load`/`jit_store` helpers (platform calling convention).
+    helper_sig: Signature,
+    /// Signature of compiled blocks: `(state, hart) -> status`, tail calling convention.
+    block_sig: Signature,
+    entry: JitEntry,
+    /// Chain slots handed out to compiled code; they must live as long as the code.
+    #[allow(clippy::vec_box, reason = "generated code holds the slots' addresses, so they must not move")]
+    slots: Vec<Box<[ChainSlot; 2]>>,
     stats: Arc<Stats>,
+    /// Debugging switches (environment variables `RV_JIT_NO_CHAIN`, `RV_JIT_NO_JUMP_CACHE`).
+    chaining: bool,
+    jump_cache: bool,
 }
 
 /// Whether the compiler can translate `op`.
@@ -158,47 +176,119 @@ fn supported(op: Op) -> bool {
     )
 }
 
+/// Size of each compiler's code cache.
+const CODE_CACHE_SIZE: usize = 512 << 20;
+
 impl Compiler {
     pub fn new() -> Result<Self, String> {
         let mut flags = settings::builder();
-        flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        // Blocks are small; Cranelift's optimisations cost more compile time than they save.
+        let opt = std::env::var("RV_JIT_OPT").unwrap_or_else(|_| "none".into());
+        flags.set("opt_level", &opt).map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        flags.set("enable_verifier", "false").map_err(|e| e.to_string())?;
+        let regalloc = std::env::var("RV_JIT_REGALLOC").unwrap_or_else(|_| "backtracking".into());
+        flags.set("regalloc_algorithm", &regalloc).map_err(|e| e.to_string())?;
         let isa = cranelift_native::builder()
             .map_err(|e| e.to_string())?
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
-        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
-        builder.symbol("rv_jit_load", jit_load as *const u8);
-        builder.symbol("rv_jit_store", jit_store as *const u8);
-        let mut module = JITModule::new(builder);
 
-        let ptr = module.target_config().pointer_type();
-        let mut sig = module.make_signature();
-        sig.params.extend([AbiParam::new(ptr), AbiParam::new(I64), AbiParam::new(I64), AbiParam::new(I64)]);
-        sig.returns.push(AbiParam::new(I64));
-        let load_fn =
-            module.declare_function("rv_jit_load", Linkage::Import, &sig).map_err(|e| e.to_string())?;
-        let store_fn =
-            module.declare_function("rv_jit_store", Linkage::Import, &sig).map_err(|e| e.to_string())?;
+        let ptr = isa.pointer_type();
+        let mut helper_sig = Signature::new(isa.default_call_conv());
+        helper_sig.params.extend([
+            AbiParam::new(ptr),
+            AbiParam::new(I64),
+            AbiParam::new(I64),
+            AbiParam::new(I64),
+        ]);
+        helper_sig.returns.push(AbiParam::new(I64));
 
-        Ok(Compiler {
-            ctx: module.make_context(),
-            module,
+        let mut block_sig = Signature::new(CallConv::Tail);
+        block_sig.params.extend([AbiParam::new(ptr), AbiParam::new(ptr)]);
+        block_sig.returns.push(AbiParam::new(I64));
+
+        let mut compiler = Compiler {
+            cache: cache::CodeCache::new(CODE_CACHE_SIZE)?,
+            isa,
+            ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
-            load_fn,
-            store_fn,
-            next_name: 0,
+            helper_sig,
+            block_sig,
+            entry: dummy_entry,
+            slots: Vec::new(),
             stats: Arc::new(Stats::default()),
-        })
+            chaining: std::env::var_os("RV_JIT_NO_CHAIN").is_none(),
+            jump_cache: std::env::var_os("RV_JIT_NO_JUMP_CACHE").is_none(),
+        };
+        compiler.entry = compiler.build_entry()?;
+        Ok(compiler)
     }
 
     pub fn stats(&self) -> Arc<Stats> {
         self.stats.clone()
     }
+
+    /// Compiles `self.ctx.func` and copies it into the code cache.
+    fn emit(&mut self) -> Result<*const u8, String> {
+        let code = self
+            .ctx
+            .compile(&*self.isa, &mut ControlPlane::default())
+            .map_err(|e| format!("{:?}", e.inner))?;
+        // All calls and jumps are indirect through absolute addresses, so nothing to relocate.
+        assert!(code.buffer.relocs().is_empty(), "generated code needs relocation");
+        let bytes = code.code_buffer();
+        self.stats.code_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+        self.cache.install(bytes).ok_or_else(|| "code cache full".to_string())
+    }
+
+    /// Builds the trampoline `entry(state, hart, code)` that calls a tail-convention block.
+    fn build_entry(&mut self) -> Result<JitEntry, String> {
+        let ptr = self.isa.pointer_type();
+        let mut sig = Signature::new(self.isa.default_call_conv());
+        sig.params.extend([AbiParam::new(ptr), AbiParam::new(ptr), AbiParam::new(I64)]);
+        sig.returns.push(AbiParam::new(I64));
+        self.ctx.clear();
+        self.ctx.func = Function::with_name_signature(Default::default(), sig);
+        let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
+        let sig_ref = b.import_signature(self.block_sig.clone());
+        let block = b.create_block();
+        b.append_block_params_for_function_params(block);
+        b.switch_to_block(block);
+        b.seal_block(block);
+        let (state, hart, code) =
+            (b.block_params(block)[0], b.block_params(block)[1], b.block_params(block)[2]);
+        let call = b.ins().call_indirect(sig_ref, code, &[state, hart]);
+        let status = b.inst_results(call)[0];
+        b.ins().return_(&[status]);
+        b.finalize(self.isa.frontend_config());
+        let entry = self.emit()?;
+        // SAFETY: generated with the `JitEntry` signature in the platform calling convention.
+        Ok(unsafe { std::mem::transmute::<*const u8, JitEntry>(entry) })
+    }
+}
+
+/// Placeholder until the real trampoline has been generated.
+unsafe extern "C" fn dummy_entry(_: *mut rv_core::hart::HartState, _: *mut rv_core::Hart, _: JitCode) -> u64 {
+    unreachable!("JIT entry used before initialisation")
 }
 
 impl BlockCompiler for Compiler {
-    fn compile(&mut self, insns: &[Insn], data_priv: Priv) -> Option<JitFn> {
+    fn entry(&self) -> JitEntry {
+        self.entry
+    }
+
+    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
+        match self.compile_now(insns, info) {
+            Some(code) => Compiled::Code(code),
+            None => Compiled::Unsupported,
+        }
+    }
+}
+
+impl Compiler {
+    fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Option<JitCode> {
+        let data_priv = info.data_priv;
         let count = insns.iter().take_while(|i| supported(i.op)).count();
         if count == 0 {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
@@ -207,14 +297,17 @@ impl BlockCompiler for Compiler {
         let insns = &insns[..count];
         let start = Instant::now();
 
-        self.module.clear_context(&mut self.ctx);
-        let ptr = self.module.target_config().pointer_type();
-        self.ctx.func.signature.params.extend([AbiParam::new(ptr), AbiParam::new(ptr)]);
-        self.ctx.func.signature.returns.push(AbiParam::new(I64));
-        let load_ref = self.module.declare_func_in_func(self.load_fn, &mut self.ctx.func);
-        let store_ref = self.module.declare_func_in_func(self.store_fn, &mut self.ctx.func);
-
+        self.ctx.clear();
+        self.ctx.func = Function::with_name_signature(Default::default(), self.block_sig.clone());
+        let mut slots: Box<[ChainSlot; 2]> = Box::default();
+        for slot in slots.iter_mut() {
+            slot.page = info.page as u32;
+        }
+        let slot_addr = [&slots[0] as *const ChainSlot as i64, &slots[1] as *const ChainSlot as i64];
+        self.slots.push(slots);
         let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
+        let block_sig_ref = b.import_signature(self.block_sig.clone());
+        let helper_sig_ref = b.import_signature(self.helper_sig.clone());
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
@@ -230,14 +323,19 @@ impl BlockCompiler for Compiler {
             b,
             state,
             hart,
-            load_ref,
-            store_ref,
+            helper_sig_ref,
             scratch,
             trusted,
             guest,
             data_priv,
             pc0: state, // replaced below
             dirty: 0,
+            block_sig_ref,
+            slot_addr,
+            page_generation: info.page_generation as i64,
+            generation: info.generation,
+            chaining: self.chaining,
+            jump_cache: self.jump_cache,
         };
         t.load_registers(insns);
         t.pc0 = t.b.ins().load(I64, t.trusted, state, abi::PC as i32);
@@ -250,25 +348,92 @@ impl BlockCompiler for Compiler {
         }
         if !ended {
             let next = t.b.ins().iadd_imm_s(t.pc0, offset);
-            t.exit(next, insns.len() as u64);
+            t.chain_exit(next, insns.len() as u64, 0);
         }
         t.b.seal_all_blocks();
-        t.b.finalize(self.module.target_config());
-
-        let name = format!("b{}", self.next_name);
-        self.next_name += 1;
-        let id = self.module.declare_function(&name, Linkage::Local, &self.ctx.func.signature).ok()?;
-        self.module.define_function(id, &mut self.ctx).ok()?;
-        let size = self.ctx.compiled_code().map_or(0, |c| c.code_buffer().len());
-        self.module.finalize_definitions().ok()?;
-        let code = self.module.get_finalized_function(id);
+        t.b.finalize(self.isa.frontend_config());
+        let code = match self.emit() {
+            Ok(code) => code,
+            Err(e) => {
+                // A full cache simply stops compilation; everything keeps running interpreted.
+                if self.stats.rejected.fetch_add(1, Ordering::Relaxed) == 0 {
+                    eprintln!("rust-v: JIT: {e}");
+                }
+                return None;
+            }
+        };
 
         self.stats.blocks.fetch_add(1, Ordering::Relaxed);
         self.stats.instructions.fetch_add(insns.len() as u64, Ordering::Relaxed);
-        self.stats.code_bytes.fetch_add(size as u64, Ordering::Relaxed);
         self.stats.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        // SAFETY: the function was generated with the `JitFn` signature.
-        Some(unsafe { std::mem::transmute::<*const u8, JitFn>(code) })
+        Some(code as JitCode)
+    }
+}
+
+/// A request to the background compiler thread.
+struct Request {
+    insns: Box<[Insn]>,
+    info: BlockInfo,
+}
+
+/// Compiles on a dedicated thread, so that the hart keeps interpreting a hot block until its
+/// code is ready instead of stalling for the compilation.
+pub struct ThreadedCompiler {
+    requests: std::sync::mpsc::Sender<Request>,
+    results: std::sync::mpsc::Receiver<(BlockInfo, Compiled)>,
+    entry: JitEntry,
+    stats: Arc<Stats>,
+}
+
+impl ThreadedCompiler {
+    pub fn new(name: &str) -> Result<Self, String> {
+        let (requests, rx_requests) = std::sync::mpsc::channel::<Request>();
+        let (tx_results, results) = std::sync::mpsc::channel();
+        let (tx_init, rx_init) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                // The Cranelift module is created and used only on this thread.
+                let mut compiler = match Compiler::new() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx_init.send(Err(e));
+                        return;
+                    }
+                };
+                let _ = tx_init.send(Ok((compiler.entry, compiler.stats())));
+                // Runs until the hart (and with it the request sender) goes away.
+                while let Ok(req) = rx_requests.recv() {
+                    let result = compiler.compile(&req.insns, req.info);
+                    if tx_results.send((req.info, result)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        let (entry, stats) = rx_init.recv().map_err(|e| e.to_string())??;
+        Ok(ThreadedCompiler { requests, results, entry, stats })
+    }
+
+    pub fn stats(&self) -> Arc<Stats> {
+        self.stats.clone()
+    }
+}
+
+impl BlockCompiler for ThreadedCompiler {
+    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
+        match self.requests.send(Request { insns: insns.into(), info }) {
+            Ok(()) => Compiled::Pending,
+            Err(_) => Compiled::Unsupported,
+        }
+    }
+
+    fn poll(&mut self) -> Option<(BlockInfo, Compiled)> {
+        self.results.try_recv().ok()
+    }
+
+    fn entry(&self) -> JitEntry {
+        self.entry
     }
 }
 
@@ -276,8 +441,7 @@ struct Translator<'a> {
     b: FunctionBuilder<'a>,
     state: Value,
     hart: Value,
-    load_ref: FuncRef,
-    store_ref: FuncRef,
+    helper_sig_ref: SigRef,
     scratch: cranelift_codegen::ir::StackSlot,
     /// Flags for accesses to `HartState` (aligned, never trap).
     trusted: MemFlagsData,
@@ -289,6 +453,14 @@ struct Translator<'a> {
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
+    block_sig_ref: SigRef,
+    /// Addresses of this block's two chain slots.
+    slot_addr: [i64; 2],
+    /// Address of the page's code generation and the generation the block was decoded at.
+    page_generation: i64,
+    generation: u32,
+    chaining: bool,
+    jump_cache: bool,
 }
 
 const fn reg_offset(r: u8) -> i32 {
@@ -322,8 +494,8 @@ impl Translator<'_> {
         }
     }
 
-    /// Writes back dirty registers and `pc`, and returns `ret` from the block.
-    fn exit(&mut self, pc: Value, ret: u64) {
+    /// Writes back dirty registers and `pc`, and adds `retired` to the retired count.
+    fn write_back(&mut self, pc: Value, retired: u64) {
         for r in 1..32u8 {
             if self.dirty & (1 << r) != 0 {
                 let v = self.b.use_var(self.regs[r as usize]);
@@ -331,14 +503,150 @@ impl Translator<'_> {
             }
         }
         self.b.ins().store(self.trusted, pc, self.state, abi::PC as i32);
-        let ret = self.b.ins().iconst(I64, ret as i64);
-        self.b.ins().return_(&[ret]);
+        let total = self.b.ins().load(I64, self.trusted, self.state, abi::JIT_RETIRED as i32);
+        let total = self.b.ins().iadd_imm_s(total, retired as i64);
+        self.b.ins().store(self.trusted, total, self.state, abi::JIT_RETIRED as i32);
+    }
+
+    /// Leaves the block for the dispatcher without a chain slot (indirect jumps, exceptions).
+    fn exit(&mut self, pc: Value, retired: u64, status: u64) {
+        self.write_back(pc, retired);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().store(self.trusted, zero, self.state, abi::JIT_CHAIN_FROM as i32);
+        let status = self.b.ins().iconst(I64, status as i64);
+        self.b.ins().return_(&[status]);
+    }
+
+    /// Leaves the block for a static successor: tail-calls it if chain slot `slot` is linked
+    /// and still valid, otherwise returns to the dispatcher (which may link the slot).
+    fn chain_exit(&mut self, pc: Value, retired: u64, slot: usize) {
+        let slot_addr = self.b.ins().iconst(I64, self.slot_addr[slot]);
+        self.chain_exit_via(pc, retired, slot_addr);
+    }
+
+    /// [`chain_exit`](Self::chain_exit) with the chain slot's address as a value, so that both
+    /// arms of a branch can share one exit sequence.
+    fn chain_exit_via(&mut self, pc: Value, retired: u64, slot_addr: Value) {
+        if !self.chaining {
+            return self.exit(pc, retired, 0);
+        }
+        self.write_back(pc, retired);
+        let t = self.trusted;
+        self.b.ins().store(t, slot_addr, self.state, abi::JIT_CHAIN_FROM as i32);
+
+        let ret = self.b.create_block();
+        let check_epoch = self.b.create_block();
+        let chain = self.b.create_block();
+        self.continue_guards(retired, ret);
+
+        // Linked?
+        let target = self.b.ins().load(I64, t, slot_addr, abi::SLOT_TARGET as i32);
+        self.b.ins().brif(target, check_epoch, &[], ret, &[]);
+
+        // Linked before the last FENCE.I, and the page unchanged since this block was decoded?
+        self.b.switch_to_block(check_epoch);
+        let link_epoch = self.b.ins().load(I32, t, slot_addr, abi::SLOT_EPOCH as i32);
+        let epoch = self.b.ins().load(I32, t, self.state, abi::JIT_FENCE_EPOCH as i32);
+        let same_epoch = self.b.ins().icmp(IntCC::Equal, link_epoch, epoch);
+        let gen_ptr = self.b.ins().iconst(I64, self.page_generation);
+        let generation = self.b.ins().load(I32, MemFlagsData::new().with_notrap(), gen_ptr, 0);
+        let same_gen = self.b.ins().icmp_imm_s(IntCC::Equal, generation, self.generation as i64);
+        let valid = self.b.ins().band(same_epoch, same_gen);
+        self.b.ins().brif(valid, chain, &[], ret, &[]);
+
+        self.b.switch_to_block(chain);
+        self.b.ins().return_call_indirect(self.block_sig_ref, target, &[self.state, self.hart]);
+
+        self.b.switch_to_block(ret);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().return_(&[zero]);
+    }
+
+    /// Charges `retired` against the budget and checks for requests to stop. Falls through to
+    /// a new current block if execution may continue in compiled code, otherwise jumps to `ret`.
+    fn continue_guards(&mut self, retired: u64, ret: cranelift_codegen::ir::Block) {
+        let t = self.trusted;
+        let check_request = self.b.create_block();
+        let go = self.b.create_block();
+        let budget = self.b.ins().load(I64, t, self.state, abi::JIT_BUDGET as i32);
+        let budget = self.b.ins().iadd_imm_s(budget, -(retired as i64));
+        self.b.ins().store(t, budget, self.state, abi::JIT_BUDGET as i32);
+        let left = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, budget, 0);
+        self.b.ins().brif(left, check_request, &[], ret, &[]);
+        // Interrupts, IPIs and other requests to stop.
+        self.b.switch_to_block(check_request);
+        let request_ptr = self.b.ins().load(I64, t, self.state, abi::JIT_EXIT_REQUEST as i32);
+        let request = self.b.ins().load(I32, MemFlagsData::new().with_notrap(), request_ptr, 0);
+        self.b.ins().brif(request, ret, &[], go, &[]);
+        self.b.switch_to_block(go);
+    }
+
+    /// Leaves the block through an indirect jump to `pc`: tail-calls the target if the fetch
+    /// TLB maps it and the jump cache holds valid code for it, otherwise returns.
+    fn indirect_exit(&mut self, pc: Value, retired: u64) {
+        if !self.jump_cache {
+            return self.exit(pc, retired, 0);
+        }
+        self.write_back(pc, retired);
+        let t = self.trusted;
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().store(t, zero, self.state, abi::JIT_CHAIN_FROM as i32);
+        let ret = self.b.create_block();
+        let hit = self.b.create_block();
+        let check = self.b.create_block();
+        let chain = self.b.create_block();
+        self.continue_guards(retired, ret);
+
+        // Fetch TLB: the mapping of the target page.
+        let vpn = self.b.ins().ushr_imm_s(pc, 12);
+        let idx = self.b.ins().band_imm_s(vpn, (abi::TLB_SIZE - 1) as i64);
+        let off = self.b.ins().imul_imm_s(idx, abi::TLB_ENTRY_SIZE as i64);
+        let entry = self.b.ins().iadd(self.state, off);
+        let table = abi::tlb_table(self.data_priv, Access::Fetch) as i32;
+        let tag = self.b.ins().load(I64, t, entry, table + abi::TLB_TAG as i32);
+        let mapped = self.b.ins().icmp(IntCC::Equal, tag, vpn);
+        self.b.ins().brif(mapped, hit, &[], ret, &[]);
+
+        // Jump cache, keyed by host address.
+        self.b.switch_to_block(hit);
+        let addend = self.b.ins().load(I64, t, entry, table + abi::TLB_ADDEND as i32);
+        let host = self.b.ins().iadd(pc, addend);
+        let slot = self.b.ins().ushr_imm_s(host, 1);
+        let slot = self.b.ins().band_imm_s(slot, (rv_core::jit::JUMP_CACHE_ENTRIES - 1) as i64);
+        let slot = self.b.ins().imul_imm_s(slot, abi::JC_ENTRY_SIZE as i64);
+        let jc = self.b.ins().iadd(self.state, slot);
+        let base = abi::JUMP_CACHE as i32;
+        let cached_host = self.b.ins().load(I64, t, jc, base + abi::JC_HOST as i32);
+        let same_host = self.b.ins().icmp(IntCC::Equal, cached_host, host);
+        let cached_priv = self.b.ins().load(I32, t, jc, base + abi::JC_DATA_PRIV as i32);
+        let same_priv = self.b.ins().icmp_imm_s(IntCC::Equal, cached_priv, self.data_priv as i64);
+        let ok = self.b.ins().band(same_host, same_priv);
+        self.b.ins().brif(ok, check, &[], ret, &[]);
+
+        self.b.switch_to_block(check);
+        let cached_epoch = self.b.ins().load(I32, t, jc, base + abi::JC_EPOCH as i32);
+        let epoch = self.b.ins().load(I32, t, self.state, abi::JIT_FENCE_EPOCH as i32);
+        let same_epoch = self.b.ins().icmp(IntCC::Equal, cached_epoch, epoch);
+        let gen_ptr = self.b.ins().load(I64, t, jc, base + abi::JC_PAGE_GENERATION as i32);
+        let generation = self.b.ins().load(I32, MemFlagsData::new().with_notrap(), gen_ptr, 0);
+        let cached_gen = self.b.ins().load(I32, t, jc, base + abi::JC_GENERATION as i32);
+        let same_gen = self.b.ins().icmp(IntCC::Equal, generation, cached_gen);
+        let valid = self.b.ins().band(same_epoch, same_gen);
+        self.b.ins().brif(valid, chain, &[], ret, &[]);
+
+        self.b.switch_to_block(chain);
+        let code = self.b.ins().load(I64, t, jc, base + abi::JC_CODE as i32);
+        self.b.ins().return_call_indirect(self.block_sig_ref, code, &[self.state, self.hart]);
+
+        self.b.switch_to_block(ret);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().return_(&[zero]);
     }
 
     /// Exit taken when instruction `index` (at byte `offset`) raised an exception.
     fn exception_exit(&mut self, index: u64, offset: i64) {
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
-        self.exit(pc, EXCEPTION | index);
+        self.exit(pc, index, EXCEPTION);
     }
 
     fn zext32(&mut self, v: Value) -> Value {
@@ -434,7 +742,8 @@ impl Translator<'_> {
         self.b.switch_to_block(slow);
         let out = self.b.ins().stack_addr(I64, self.scratch, 0);
         let size_v = self.b.ins().iconst(I64, size as i64);
-        let call = self.b.ins().call(self.load_ref, &[self.hart, addr, size_v, out]);
+        let helper = self.b.ins().iconst(I64, jit_load as *const () as usize as i64);
+        let call = self.b.ins().call_indirect(self.helper_sig_ref, helper, &[self.hart, addr, size_v, out]);
         let status = self.b.inst_results(call)[0];
         self.b.ins().brif(status, fault, &[], ok, &[]);
 
@@ -490,7 +799,8 @@ impl Translator<'_> {
 
         self.b.switch_to_block(slow);
         let size_v = self.b.ins().iconst(I64, size as i64);
-        let call = self.b.ins().call(self.store_ref, &[self.hart, addr, size_v, value]);
+        let helper = self.b.ins().iconst(I64, jit_store as *const () as usize as i64);
+        let call = self.b.ins().call_indirect(self.helper_sig_ref, helper, &[self.hart, addr, size_v, value]);
         let status = self.b.inst_results(call)[0];
         self.b.ins().brif(status, fault, &[], done, &[]);
 
@@ -590,7 +900,7 @@ impl Translator<'_> {
                 let link = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 self.set(rd, link);
                 let target = self.b.ins().iadd_imm_s(self.pc0, offset + imm);
-                self.exit(target, retired);
+                self.chain_exit(target, retired, 0);
                 return true;
             }
             Op::Jalr => {
@@ -599,7 +909,7 @@ impl Translator<'_> {
                 let target = self.b.ins().band_imm_s(t, !1);
                 let link = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 self.set(rd, link);
-                self.exit(target, retired);
+                self.indirect_exit(target, retired);
                 return true;
             }
             Op::Beq | Op::Bne | Op::Blt | Op::Bge | Op::Bltu | Op::Bgeu => {
@@ -614,10 +924,14 @@ impl Translator<'_> {
                 let a = self.get(insn.rs1);
                 let b = self.get(insn.rs2);
                 let taken = self.b.ins().icmp(cc, a, b);
+                // Select the successor and its chain slot, then share one exit sequence.
                 let target = self.b.ins().iadd_imm_s(self.pc0, offset + imm);
                 let fall = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 let next = self.b.ins().select(taken, target, fall);
-                self.exit(next, retired);
+                let slot_taken = self.b.ins().iconst(I64, self.slot_addr[0]);
+                let slot_fall = self.b.ins().iconst(I64, self.slot_addr[1]);
+                let slot = self.b.ins().select(taken, slot_taken, slot_fall);
+                self.chain_exit_via(next, retired, slot);
                 return true;
             }
             Op::Lb | Op::Lh | Op::Lw | Op::Ld | Op::Lbu | Op::Lhu | Op::Lwu => {

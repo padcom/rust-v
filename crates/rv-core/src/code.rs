@@ -41,6 +41,11 @@ impl CodePages {
         self.generations[page].load(Ordering::Acquire)
     }
 
+    /// Address of `page`'s generation counter, for generated code.
+    pub fn generation_ptr(&self, page: usize) -> *const AtomicU32 {
+        &self.generations[page]
+    }
+
     /// Must be called after writing to RAM page `page` by any path other than a write-TLB hit.
     #[inline(always)]
     pub fn note_write(&self, page: usize) {

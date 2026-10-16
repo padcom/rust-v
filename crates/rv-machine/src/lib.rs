@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use rv_core::{Bus, Exit, Hart, HartConfig, HartShared, HostClock, TimeSource};
 
 pub use power::Shutdown;
+pub use rv_jit::Stats as JitStats;
 
 pub mod layout {
     pub const TEST_BASE: u64 = 0x0010_0000;
@@ -67,6 +68,8 @@ pub struct MachineConfig {
     pub jit: bool,
     /// Interpretations of a block before it gets compiled.
     pub jit_threshold: u32,
+    /// Compile on background threads (otherwise the hart stalls while compiling).
+    pub jit_background: bool,
     /// Vector register length in bits.
     pub vlen: usize,
     /// Number of harts.
@@ -86,6 +89,7 @@ impl Default for MachineConfig {
             max_satp_mode: rv_core::csr::satp::MODE_SV48,
             jit: false,
             jit_threshold: 16,
+            jit_background: true,
             vlen: 128,
             harts: 4,
             threaded: true,
@@ -103,8 +107,8 @@ pub struct Machine {
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
     pub stats: Stats,
-    /// JIT compilation statistics, when the JIT is enabled.
-    pub jit_stats: Option<Arc<rv_jit::Stats>>,
+    /// JIT compilation statistics per hart, when the JIT is enabled.
+    pub jit_stats: Option<Vec<Arc<rv_jit::Stats>>>,
     threaded: bool,
 }
 
@@ -243,10 +247,17 @@ impl Machine {
             })
             .collect();
         if config.jit {
-            for hart in &mut harts {
-                let compiler = rv_jit::Compiler::new().map_err(Error::Jit)?;
-                jit_stats = Some(compiler.stats());
-                hart.compiler = Some(Box::new(compiler));
+            for (id, hart) in harts.iter_mut().enumerate() {
+                let compiler: Box<dyn rv_core::jit::BlockCompiler> = if config.jit_background {
+                    let c = rv_jit::ThreadedCompiler::new(&format!("jit{id}")).map_err(Error::Jit)?;
+                    jit_stats.get_or_insert_with(Vec::new).push(c.stats());
+                    Box::new(c)
+                } else {
+                    let c = rv_jit::Compiler::new().map_err(Error::Jit)?;
+                    jit_stats.get_or_insert_with(Vec::new).push(c.stats());
+                    Box::new(c)
+                };
+                hart.compiler = Some(compiler);
                 hart.jit_threshold = config.jit_threshold;
             }
         }

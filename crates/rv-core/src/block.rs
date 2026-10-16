@@ -12,7 +12,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use rv_isa::{Insn, Op, decode};
 
 use crate::hart::Priv;
-use crate::jit::JitFn;
+use crate::jit::JitCode;
 use crate::mem::{PAGE_SIZE, host_load};
 
 pub(crate) const MAX_BLOCK_INSNS: usize = 64;
@@ -25,17 +25,19 @@ pub(crate) struct Block {
     pub generation: u32,
     /// Times the block has been interpreted; drives compilation.
     pub hits: u32,
-    /// Native code, compiled for data accesses at `jit_priv`.
-    pub jit: Option<(JitFn, Priv)>,
+    /// Native code, compiled for data accesses at the given privilege.
+    pub jit: Option<(JitCode, Priv)>,
     /// Compilation was attempted and failed (unsupported instructions).
     pub jit_failed: bool,
+    /// A background compilation is in flight.
+    pub jit_pending: bool,
     /// The hart's FENCE.I epoch at which the block was last known to match memory.
     pub fence_epoch: u32,
 }
 
 impl Block {
     pub fn new(insns: Box<[Insn]>, generation: u32, fence_epoch: u32) -> Self {
-        Block { insns, generation, hits: 0, jit: None, jit_failed: false, fence_epoch }
+        Block { insns, generation, hits: 0, jit: None, jit_failed: false, jit_pending: false, fence_epoch }
     }
 
     /// Whether the instruction bits at `start` still match the decoded block.
@@ -83,6 +85,8 @@ impl Hasher for PtrHasher {
 pub(crate) struct BlockCache {
     map: HashMap<usize, u32, BuildHasherDefault<PtrHasher>>,
     blocks: Vec<Block>,
+    /// Host address of each block, by index.
+    hosts: Vec<usize>,
 }
 
 impl BlockCache {
@@ -94,6 +98,11 @@ impl BlockCache {
     #[inline(always)]
     pub fn block(&self, idx: u32) -> &Block {
         &self.blocks[idx as usize]
+    }
+
+    #[inline(always)]
+    pub fn host(&self, idx: u32) -> *const u8 {
+        self.hosts[idx as usize] as *const u8
     }
 
     #[inline(always)]
@@ -111,6 +120,7 @@ impl BlockCache {
         }
         let idx = self.blocks.len() as u32;
         self.blocks.push(block);
+        self.hosts.push(host as usize);
         self.map.insert(host as usize, idx);
         idx
     }
@@ -118,6 +128,7 @@ impl BlockCache {
     pub fn clear(&mut self) {
         self.map.clear();
         self.blocks.clear();
+        self.hosts.clear();
     }
 }
 

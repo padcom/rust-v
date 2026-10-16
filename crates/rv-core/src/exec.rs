@@ -7,6 +7,7 @@ use rv_isa::{Insn, Op, decode};
 use crate::block::{Block, decode_block};
 use crate::csr::status;
 use crate::hart::{Hart, Priv, Reservation};
+use crate::jit::{BlockInfo, ChainSlot, Compiled, JitCode, JumpCacheEntry, jump_cache_index};
 use crate::mem::PAGE_SIZE;
 use crate::mmu::Access;
 use crate::trap::{Exception, cause};
@@ -34,6 +35,8 @@ impl Hart {
     /// Runs up to `budget` instructions (possibly a few more, to finish a block).
     pub fn run(&mut self, budget: u64) -> Exit {
         let mut executed = 0;
+        // Only link chain slots within one run: the caller may change pc in between.
+        self.state.jit.chain_from = 0;
         while executed < budget {
             if self.shared.exit_request.load(Ordering::Relaxed) != 0 {
                 self.shared.exit_request.store(0, Ordering::Relaxed);
@@ -53,17 +56,20 @@ impl Hart {
                 self.take_trap(irq, 0);
                 continue;
             }
-            executed += self.run_block();
+            executed += self.run_block(budget - executed);
         }
         Exit::Budget
     }
 
-    /// Executes the block at `pc`. Returns the number of instructions attempted.
-    fn run_block(&mut self) -> u64 {
+    /// Executes the block at `pc` (and, when compiled, whatever it chains to, within `budget`).
+    /// Returns the number of instructions attempted.
+    fn run_block(&mut self, budget: u64) -> u64 {
         let block = match self.lookup_block() {
             Ok(Some(b)) => b,
-            // An instruction straddling a page boundary: execute it on its own.
+            // An instruction straddling a page boundary: execute it on its own. The block that
+            // follows it is not the last exit's successor, so drop the pending chain link.
             Ok(None) => {
+                self.state.jit.chain_from = 0;
                 self.step_one();
                 return 1;
             }
@@ -73,30 +79,17 @@ impl Hart {
             }
         };
         // Compiled code inlines the TLB lookup without pointer masking.
-        if self.compiler.is_some() && self.pm_len[crate::mmu::tlb_index(self.data_priv())] == 0 {
-            let data_priv = self.data_priv();
-            let b = self.blocks.block_mut(block);
-            match b.jit {
-                Some((f, p)) if p == data_priv => return self.run_compiled(f),
-                Some(_) => {}
-                None if !b.jit_failed => {
-                    b.hits += 1;
-                    if b.hits >= self.jit_threshold {
-                        let insns = b.insns.clone();
-                        let compiled = self.compiler.as_mut().unwrap().compile(&insns, data_priv);
-                        let b = self.blocks.block_mut(block);
-                        match compiled {
-                            Some(f) => {
-                                b.jit = Some((f, data_priv));
-                                return self.run_compiled(f);
-                            }
-                            None => b.jit_failed = true,
-                        }
-                    }
-                }
-                None => {}
-            }
+        if self.compiler.is_some()
+            && self.pm_len[crate::mmu::tlb_index(self.data_priv())] == 0
+            && let Some(code) = self.compiled_code(block)
+        {
+            let host = self.blocks.host(block);
+            let page = self.bus.ram_page_of(host);
+            self.link_chain(page, code);
+            self.fill_jump_cache(block, host, page, code);
+            return self.run_compiled(code, budget);
         }
+        self.state.jit.chain_from = 0;
         let len = self.blocks.block(block).insns.len();
         for i in 0..len {
             let insn = self.blocks.block(block).insns[i];
@@ -122,7 +115,7 @@ impl Hart {
         if let Some(idx) = self.blocks.get(host)
             && self.blocks.block(idx).generation == self.bus.code().generation(page)
         {
-            if self.blocks.block(idx).fence_epoch == self.fence_epoch {
+            if self.blocks.block(idx).fence_epoch == self.state.jit.fence_epoch {
                 return Ok(Some(idx));
             }
             // A FENCE.I happened since the block was last validated. Other harts may have
@@ -130,7 +123,7 @@ impl Hart {
             // page, so compare the instruction bits.
             // SAFETY: the block was decoded from `host`, within one page of guest RAM.
             if unsafe { self.blocks.block(idx).matches_memory(host) } {
-                self.blocks.block_mut(idx).fence_epoch = self.fence_epoch;
+                self.blocks.block_mut(idx).fence_epoch = self.state.jit.fence_epoch;
                 return Ok(Some(idx));
             }
         }
@@ -147,7 +140,109 @@ impl Hart {
         if insns.is_empty() {
             return Ok(None);
         }
-        Ok(Some(self.blocks.insert(host, Block::new(insns.into_boxed_slice(), generation, self.fence_epoch))))
+        Ok(Some(
+            self.blocks
+                .insert(host, Block::new(insns.into_boxed_slice(), generation, self.state.jit.fence_epoch)),
+        ))
+    }
+
+    /// Makes `code` reachable from compiled indirect jumps.
+    fn fill_jump_cache(&mut self, block: u32, host: *const u8, page: usize, code: JitCode) {
+        let b = self.blocks.block(block);
+        self.state.jit.jump_cache[jump_cache_index(host as u64)] = JumpCacheEntry {
+            host: host as u64,
+            code,
+            page_generation: self.bus.code().generation_ptr(page) as u64,
+            generation: b.generation,
+            epoch: self.state.jit.fence_epoch,
+            data_priv: self.state.privilege as u32,
+            _pad: 0,
+        };
+    }
+
+    /// Compiled code for `block` at the current data privilege, compiling it once it is hot.
+    /// Code is only compiled and run while instruction fetch and data accesses use the same
+    /// privilege (i.e. not under MPRV), which compiled indirect jumps rely on.
+    fn compiled_code(&mut self, block: u32) -> Option<JitCode> {
+        let data_priv = self.data_priv();
+        if data_priv != self.state.privilege {
+            return None;
+        }
+        if self.jit_pending > 0 {
+            self.install_compiled();
+        }
+        let b = self.blocks.block_mut(block);
+        match b.jit {
+            Some((code, p)) if p == data_priv => return Some(code),
+            Some(_) => return None,
+            None if b.jit_failed || b.jit_pending => return None,
+            None => {}
+        }
+        b.hits += 1;
+        if b.hits < self.jit_threshold {
+            return None;
+        }
+        let insns = b.insns.clone();
+        let generation = b.generation;
+        let host = self.blocks.host(block);
+        let page = self.bus.ram_page_of(host);
+        let info = BlockInfo {
+            host: host as u64,
+            data_priv,
+            page_generation: self.bus.code().generation_ptr(page),
+            generation,
+            page,
+        };
+        let result = self.compiler.as_mut().unwrap().compile(&insns, info);
+        let b = self.blocks.block_mut(block);
+        match result {
+            Compiled::Code(code) => {
+                b.jit = Some((code, data_priv));
+                Some(code)
+            }
+            Compiled::Unsupported => {
+                b.jit_failed = true;
+                None
+            }
+            Compiled::Pending => {
+                b.jit_pending = true;
+                self.jit_pending += 1;
+                None
+            }
+        }
+    }
+
+    /// Installs finished background compilations into blocks that are still current.
+    fn install_compiled(&mut self) {
+        while let Some((info, result)) = self.compiler.as_mut().and_then(|c| c.poll()) {
+            self.jit_pending -= 1;
+            let Some(idx) = self.blocks.get(info.host as *const u8) else { continue };
+            let b = self.blocks.block_mut(idx);
+            // The block may have been replaced (new generation) since the request was made.
+            if !b.jit_pending || b.generation != info.generation {
+                continue;
+            }
+            b.jit_pending = false;
+            match result {
+                Compiled::Code(code) => b.jit = Some((code, info.data_priv)),
+                _ => b.jit_failed = true,
+            }
+        }
+    }
+
+    /// If the last compiled block left through an unlinked chain slot and `code` is in the
+    /// same page, link the slot so that next time it jumps straight here.
+    fn link_chain(&mut self, page: usize, code: JitCode) {
+        let slot = std::mem::take(&mut self.state.jit.chain_from);
+        if slot == 0 {
+            return;
+        }
+        // SAFETY: chain slots live as long as the compiler that handed them out.
+        let slot = unsafe { &mut *(slot as *mut ChainSlot) };
+        if slot.page as usize == page {
+            slot.target = code;
+            slot.epoch = self.state.jit.fence_epoch;
+        }
     }
 
     #[inline(always)]
@@ -468,7 +563,7 @@ impl Hart {
             // other harts may not have, so cached blocks are re-checked lazily against memory.
             Op::FenceI => {
                 fence(Ordering::SeqCst);
-                self.fence_epoch = self.fence_epoch.wrapping_add(1);
+                self.state.jit.fence_epoch = self.state.jit.fence_epoch.wrapping_add(1);
             }
 
             Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci => {
