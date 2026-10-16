@@ -1,0 +1,9 @@
+[package]
+name = "rv-softfloat"
+description = "IEEE 754 binary16/32/64 arithmetic with RISC-V rounding, flags and NaN semantics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

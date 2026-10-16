@@ -10,6 +10,7 @@ repository = "https://github.com/padcom/risc-vm"
 
 [workspace.dependencies]
 rv-isa = { path = "crates/rv-isa" }
+rv-softfloat = { path = "crates/rv-softfloat" }
 rv-core = { path = "crates/rv-core" }
 rv-elf = { path = "crates/rv-elf" }
 rv-machine = { path = "crates/rv-machine" }
