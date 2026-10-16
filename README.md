@@ -28,6 +28,7 @@ Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful option
 | Option | Meaning |
 |---|---|
 | `-m, --memory 1G` | RAM size |
+| `--vlen 256` | vector register length (128, 256 or 512 bits) |
 | `--append "..."` | kernel command line |
 | `--mmu sv39\|sv48\|sv57` | largest virtual-memory mode offered to the guest |
 | `--jit` | compile hot code to native instructions (experimental) |
@@ -44,6 +45,12 @@ scripts/build-riscv-tests.sh                 # needs riscv64-elf-gcc (or set RIS
 cargo test --release -p rv-conformance -- --ignored    # interpreter and JIT
 
 cargo test --release -p rv-machine -- --ignored boot_linux   # needs the guest images
+
+scripts/build-testfloat-vectors.sh           # Berkeley TestFloat vectors (container)
+cargo test --release -p rv-softfloat -- --ignored
+
+scripts/build-vector-tests.sh                # Spike + riscv-vector-tests (container, slow)
+cargo test --release -p rv-conformance -- --ignored vector_tests
 ```
 
 ## Layout
@@ -51,7 +58,8 @@ cargo test --release -p rv-machine -- --ignored boot_linux   # needs the guest i
 | Crate | Contents |
 |---|---|
 | `rv-isa` | instruction decoder and disassembler |
-| `rv-core` | hart state, CSRs, traps, MMU, decoded-block cache, interpreter |
+| `rv-softfloat` | IEEE 754 binary16/32/64 with RISC-V rounding, flags and NaNs |
+| `rv-core` | hart state, CSRs, traps, MMU, FPU, vector unit, decoded-block cache, interpreter |
 | `rv-elf` | minimal ELF loader |
 | `rv-jit` | Cranelift-based block compiler |
 | `rv-conformance` | riscv-tests runner for interpreter and JIT |

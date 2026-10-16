@@ -12,7 +12,7 @@ is fast enough to use GNOME and a web browser.
 | 1: Single-hart interpreter | ✅ RV64IMAC + M/S/U, Sv39/48/57, all 198 rv64 ui/um/ua/uc/mi/si riscv-tests pass. Spike lockstep and PMP enforcement still to do |
 | 2: Board + Linux boot | ✅ OpenSBI 1.6 + Linux 6.12 boot to an init shell in ~1.7 s; decode cache (98 → 199 MIPS); GDB stub. The shell is a freestanding mini-init until F/D land (Debian userland is hard-float) |
 | 2.5: JIT spike | ✅ Cranelift block JIT behind `--jit`: CoreMark 666 → 2272 it/s (3.4×), riscv-tests and Linux boot pass under the JIT. Findings and Phase 5 decisions in [docs/jit-spike.md](docs/jit-spike.md): chaining first (68% of hot time is dispatch), compile off-thread (~15 µs per guest instruction) |
-| 3: Full RVA23 ISA | next, starting with F/D (unblocks busybox/glibc userland) |
+| 3: Full RVA23 ISA | 🚧 F/D/Zfa/Zfhmin on a TestFloat-verified softfloat (busybox/glibc userland runs); Zba/Zbb/Zbs/Zicond/Zcb/Zimop/Zcmop/Zawrs/Zicbo*/Svinval; Sstc, Svpbmt, Svnapot, Smstateen/Ssstateen, Smnpm/Ssnpm, Sscofpmf; RVV 1.0 + Zvfh/Zvfhmin/Zvbb (verifying against Spike via riscv-vector-tests). H deferred to Phase 10 |
 
 ---
 
