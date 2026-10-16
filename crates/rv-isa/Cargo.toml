@@ -1,0 +1,9 @@
+[package]
+name = "rv-isa"
+description = "RISC-V instruction definitions, decoder and disassembler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
