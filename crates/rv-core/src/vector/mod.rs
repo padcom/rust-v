@@ -268,7 +268,7 @@ pub mod profile {
             .map(|k| (p.counts[k].load(Ordering::Relaxed), p.examples[k].load(Ordering::Relaxed)))
             .filter(|&(n, _)| n > 0)
             .collect();
-        rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        rows.sort_unstable_by_key(|r| std::cmp::Reverse(r.0));
         let total: u64 = rows.iter().map(|r| r.0).sum();
         let mut out = format!("vector instructions: {total}\n");
         for (n, raw) in rows.into_iter().take(top) {
