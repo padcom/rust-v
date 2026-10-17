@@ -100,10 +100,7 @@ fn boot(jit: bool, jit_cache_size: usize) {
     disk[..16].copy_from_slice(b"RUST-V DISK TEST");
     let config = MachineConfig {
         drives: vec![Drive { backend: Box::new(disk), read_only: false }],
-        net: Some(rv_machine::rv_net::Config {
-            tcp_forwards: vec![(forward, 8080)],
-            ..Default::default()
-        }),
+        net: Some(rv_machine::rv_net::Config { tcp_forwards: vec![(forward, 8080)], ..Default::default() }),
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),

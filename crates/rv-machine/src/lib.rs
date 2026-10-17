@@ -2,6 +2,7 @@
 //! unmodified OpenSBI, U-Boot and Linux images run on it.
 
 pub mod clint;
+pub mod display;
 pub mod fdt;
 pub mod gdb;
 pub mod pci;
@@ -96,6 +97,8 @@ pub struct MachineConfig {
     pub rng: bool,
     /// Add a virtio-net device on a user-mode network with these settings.
     pub net: Option<rv_net::Config>,
+    /// Add a virtio-gpu device showing on this display, with a virtio keyboard and tablet.
+    pub display: Option<Arc<display::Display>>,
 }
 
 /// A virtio-blk disk.
@@ -123,6 +126,7 @@ impl Default for MachineConfig {
             drives: Vec::new(),
             rng: true,
             net: None,
+            display: None,
         }
     }
 }
@@ -134,6 +138,10 @@ pub struct Machine {
     pub plic: Arc<plic::Plic>,
     pub uart: Arc<uart::Uart>,
     pub pci: Arc<pci::PciHost>,
+    /// Present when the machine has a display.
+    pub gpu: Option<virtio::gpu::GpuHandle>,
+    pub keyboard: Option<virtio::input::InputHandle>,
+    pub tablet: Option<virtio::input::InputHandle>,
     pub power: Arc<power::PowerState>,
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
@@ -228,6 +236,18 @@ impl Machine {
                 .map_err(|e| Error::Layout(format!("user-mode networking: {e}")))?;
             net.set_backend(Box::new(backend));
             virtio_devices.push(Box::new(net));
+        }
+        let (mut gpu, mut keyboard, mut tablet) = (None, None, None);
+        if let Some(display) = config.display {
+            let (dev, handle) = virtio::gpu::Gpu::new(display);
+            gpu = Some(handle);
+            virtio_devices.push(Box::new(dev));
+            let (dev, handle) = virtio::input::Input::new(virtio::input::Kind::Keyboard);
+            keyboard = Some(handle);
+            virtio_devices.push(Box::new(dev));
+            let (dev, handle) = virtio::input::Input::new(virtio::input::Kind::Tablet);
+            tablet = Some(handle);
+            virtio_devices.push(Box::new(dev));
         }
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
@@ -330,6 +350,9 @@ impl Machine {
             plic,
             uart,
             pci,
+            gpu,
+            keyboard,
+            tablet,
             power,
             dtb,
             stats: Stats::default(),

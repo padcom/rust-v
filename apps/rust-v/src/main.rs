@@ -4,6 +4,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
+
+mod gui;
+mod keymap;
+mod screenshot;
 use rv_machine::{Machine, MachineConfig, Shutdown};
 
 /// RISC-V RVA23 system emulator.
@@ -56,6 +60,17 @@ struct Args {
     /// `,snapshot` to keep writes in memory and leave the image unchanged.
     #[arg(long, value_name = "PATH[,ro][,snapshot]")]
     disk: Vec<String>,
+    /// Where the guest display goes: `window` adds a GPU, keyboard and tablet shown in a
+    /// desktop window; `none` (the default) is serial console only.
+    /// `headless` adds the devices without a window (see --screenshot).
+    #[arg(long, default_value = "none", value_parser = ["none", "window", "headless"])]
+    display: String,
+    /// Save the guest display to this PNG file every two seconds while it changes.
+    #[arg(long)]
+    screenshot: Option<PathBuf>,
+    /// Initial display resolution, e.g. 1920x1080.
+    #[arg(long, default_value = "1280x800", value_parser = parse_resolution)]
+    resolution: (u32, u32),
     /// Do not add a network card.
     #[arg(long)]
     no_net: bool,
@@ -82,6 +97,16 @@ fn parse_size(s: &str) -> Result<u64, String> {
     };
     let n: u64 = digits.parse().map_err(|_| format!("invalid size `{s}`"))?;
     n.checked_shl(shift).filter(|v| v % 4096 == 0 && *v > 0).ok_or(format!("invalid size `{s}`"))
+}
+
+fn parse_resolution(s: &str) -> Result<(u32, u32), String> {
+    let err = || format!("invalid resolution `{s}` (expected WIDTHxHEIGHT)");
+    let (w, h) = s.split_once('x').ok_or_else(err)?;
+    let (w, h): (u32, u32) = (w.parse().map_err(|_| err())?, h.parse().map_err(|_| err())?);
+    if !(320..=8192).contains(&w) || !(200..=8192).contains(&h) {
+        return Err(err());
+    }
+    Ok((w, h))
 }
 
 fn parse_forward(s: &str) -> Result<(std::net::SocketAddr, u16), String> {
@@ -181,6 +206,17 @@ fn open_disk(spec: &str) -> Result<rv_machine::Drive, String> {
     Ok(rv_machine::Drive { backend, read_only })
 }
 
+fn run_machine(machine: &mut Machine, gdb: Option<&str>) -> Result<Shutdown, String> {
+    match gdb {
+        Some(addr) => {
+            let addr = if addr.contains(':') { addr.to_string() } else { format!("127.0.0.1:{addr}") };
+            let stub = rv_machine::gdb::GdbStub::listen(&addr).map_err(|e| format!("gdb: {addr}: {e}"))?;
+            stub.run(machine).map_err(|e| format!("gdb: {e}"))
+        }
+        None => Ok(machine.run()),
+    }
+}
+
 fn run(args: Args) -> Result<Shutdown, String> {
     let config = MachineConfig {
         ram_size: args.memory,
@@ -204,7 +240,13 @@ fn run(args: Args) -> Result<Shutdown, String> {
         rng: true,
         net: (!args.no_net)
             .then(|| rv_machine::rv_net::Config { tcp_forwards: args.forward.clone(), ..Default::default() }),
+        display: (args.display != "none")
+            .then(|| rv_machine::display::Display::new(args.resolution.0, args.resolution.1)),
     };
+    if let (Some(display), Some(path)) = (&config.display, &args.screenshot) {
+        screenshot::spawn(display.clone(), path.clone(), std::time::Duration::from_secs(2));
+    }
+    let window = config.display.clone().filter(|_| args.display == "window");
     let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {
         std::fs::write(path, &machine.dtb).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -216,13 +258,41 @@ fn run(args: Args) -> Result<Shutdown, String> {
         eprint!("rust-v: press Ctrl-A x to quit\r\n");
     }
     spawn_console_input(machine.uart.clone(), interactive);
-    let reason = match &args.gdb {
-        Some(addr) => {
-            let addr = if addr.contains(':') { addr.clone() } else { format!("127.0.0.1:{addr}") };
-            let stub = rv_machine::gdb::GdbStub::listen(&addr).map_err(|e| format!("gdb: {addr}: {e}"))?;
-            stub.run(&mut machine).map_err(|e| format!("gdb: {e}"))?
+    let reason = match window {
+        // The window's event loop must own the main thread (macOS requires it), so the
+        // machine runs on another one.
+        Some(display) => {
+            let (event_loop, waker) = gui::event_loop()?;
+            let devices = gui::Devices {
+                display: display.clone(),
+                gpu: machine.gpu.clone().expect("display without a GPU"),
+                keyboard: machine.keyboard.clone().expect("display without a keyboard"),
+                tablet: machine.tablet.clone().expect("display without a tablet"),
+            };
+            let redraw = waker.clone();
+            display.set_waker(move || redraw.redraw());
+            let quit = waker.clone();
+            let gdb = args.gdb.clone();
+            let runner = std::thread::Builder::new()
+                .name("machine".into())
+                .spawn(move || {
+                    let reason = run_machine(&mut machine, gdb.as_deref());
+                    quit.quit();
+                    (machine, reason)
+                })
+                .map_err(|e| e.to_string())?;
+            gui::run(devices, event_loop, waker);
+            if !runner.is_finished() {
+                // The window was closed while the guest was still running.
+                drop(_raw);
+                eprintln!("\r\nrust-v: window closed");
+                std::process::exit(0);
+            }
+            let (finished, reason) = runner.join().map_err(|_| "machine thread panicked".to_string())?;
+            machine = finished;
+            reason?
         }
-        None => machine.run(),
+        None => run_machine(&mut machine, args.gdb.as_deref())?,
     };
     let _ = std::io::stdout().flush();
     if args.stats {

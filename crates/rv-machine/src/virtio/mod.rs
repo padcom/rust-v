@@ -1,6 +1,8 @@
 //! Virtio 1.x devices behind the modern virtio-pci transport.
 
 pub mod blk;
+pub mod gpu;
+pub mod input;
 pub mod net;
 pub mod pci;
 pub mod queue;
@@ -20,6 +22,9 @@ pub mod device_type {
     pub const BLOCK: u16 = 2;
     pub const CONSOLE: u16 = 3;
     pub const RNG: u16 = 4;
+    pub const GPU: u16 = 16;
+    pub const INPUT: u16 = 18;
+    pub const SOUND: u16 = 25;
 }
 
 /// Transport-level feature bits.

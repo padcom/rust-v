@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# Downloads the official Ubuntu RISC-V preinstalled server image, checks it against Ubuntu's
-# SHA256SUMS and unpacks it into third_party/ubuntu/ubuntu-<release>-server-riscv64.img,
-# grown to $DISK_SIZE (the guest's cloud-init grows the root partition into the free space).
+# Downloads an official Ubuntu RISC-V image and checks it against Ubuntu's SHA256SUMS.
+#
+#   scripts/fetch-ubuntu.sh            preinstalled server image, unpacked into
+#                                      third_party/ubuntu/ubuntu-<release>-server-riscv64.img and
+#                                      grown to $DISK_SIZE (cloud-init grows the root partition)
+#   scripts/fetch-ubuntu.sh desktop    desktop live ISO,
+#                                      third_party/ubuntu/ubuntu-<release>-desktop-riscv64.iso
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$ROOT/third_party/ubuntu"
+FLAVOR="${1:-server}"
 RELEASE="${UBUNTU_RELEASE:-26.10}"
 DISK_SIZE="${DISK_SIZE:-16G}"
-NAME="ubuntu-$RELEASE-preinstalled-server-riscv64.img.xz"
 URL="https://cdimage.ubuntu.com/ubuntu/releases/$RELEASE/release"
+case "$FLAVOR" in
+  server) NAME="ubuntu-$RELEASE-preinstalled-server-riscv64.img.xz" ;;
+  desktop) NAME="ubuntu-$RELEASE-desktop-riscv64.iso" ;;
+  *) echo "usage: $0 [server|desktop]" >&2; exit 2 ;;
+esac
 
 mkdir -p "$OUT"
 cd "$OUT"
@@ -20,6 +29,10 @@ actual="$( (command -v sha256sum >/dev/null && sha256sum "$NAME" || shasum -a 25
 if [ "$expected" != "$actual" ]; then
   echo "checksum mismatch for $NAME: expected $expected, got $actual" >&2
   exit 1
+fi
+if [ "$FLAVOR" = desktop ]; then
+  echo "$OUT/$NAME"
+  exit 0
 fi
 IMG="ubuntu-$RELEASE-server-riscv64.img"
 xz -dc "$NAME" > "$IMG.tmp"

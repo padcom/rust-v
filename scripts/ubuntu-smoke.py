@@ -74,11 +74,17 @@ def mark(what):
 wait(r"U-Boot 20"); mark("U-Boot")
 wait(r"Linux version"); mark("Linux")
 wait(r"login: "); mark("login prompt")
-time.sleep(2)
-send("ubuntu\n")
-wait(r"Password: ")
-send("ubuntu\n")
-m = wait(r"(Current password: |\$ )")
+# cloud-init sets the password a little after the first login prompt appears.
+for attempt in range(10):
+    time.sleep(2)
+    send("ubuntu\n")
+    wait(r"Password: ")
+    send("ubuntu\n")
+    m = wait(r"(Current password: |\$ |Login incorrect)")
+    if b"incorrect" not in m.group(0):
+        break
+    wait(r"login: ")
+    time.sleep(3)
 if b"Current" in m.group(0):
     send("ubuntu\n"); wait(r"New password: ")
     send(PASSWORD + "\n"); wait(r"Retype new password: ")
