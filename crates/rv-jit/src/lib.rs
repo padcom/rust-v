@@ -31,8 +31,8 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use rv_core::Priv;
 use rv_core::jit::{
-    BlockCompiler, BlockInfo, ChainSlot, Compiled, EXCEPTION, JitCode, JitEntry, Region, abi, jit_load,
-    jit_store,
+    BlockCompiler, BlockInfo, ChainSlot, CodeRef, Compiled, EXCEPTION, JitCode, JitEntry, Region, abi,
+    jit_load, jit_store,
 };
 use rv_core::mmu::Access;
 use rv_isa::{Insn, Op};
@@ -51,6 +51,8 @@ pub struct Stats {
 
 pub struct Compiler {
     isa: Arc<dyn TargetIsa>,
+    /// Same target, with the faster register allocator (first-tier code).
+    fast_isa: Arc<dyn TargetIsa>,
     /// Own code cache; workers of a shared [`pool::JitPool`] have none.
     cache: Option<cache::CodeCache>,
     ctx: Context,
@@ -206,18 +208,24 @@ impl Compiler {
 
     /// A compiler without a code cache, reporting into `stats`.
     pub(crate) fn bare(stats: Arc<Stats>) -> Result<Self, String> {
-        let mut flags = settings::builder();
-        // Blocks are small; Cranelift's optimisations cost more compile time than they save.
-        let opt = std::env::var("RV_JIT_OPT").unwrap_or_else(|_| "none".into());
-        flags.set("opt_level", &opt).map_err(|e| e.to_string())?;
-        flags.set("is_pic", "false").map_err(|e| e.to_string())?;
-        flags.set("enable_verifier", "false").map_err(|e| e.to_string())?;
+        let make_isa = |regalloc: &str| -> Result<Arc<dyn TargetIsa>, String> {
+            let mut flags = settings::builder();
+            // Blocks are small; Cranelift's optimisations cost more compile time than they save.
+            let opt = std::env::var("RV_JIT_OPT").unwrap_or_else(|_| "none".into());
+            flags.set("opt_level", &opt).map_err(|e| e.to_string())?;
+            flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+            flags.set("enable_verifier", "false").map_err(|e| e.to_string())?;
+            flags.set("regalloc_algorithm", regalloc).map_err(|e| e.to_string())?;
+            cranelift_native::builder()
+                .map_err(|e| e.to_string())?
+                .finish(settings::Flags::new(flags))
+                .map_err(|e| e.to_string())
+        };
+        // Second-tier (hot) code gets the better register allocator; first-tier code the
+        // faster one.
         let regalloc = std::env::var("RV_JIT_REGALLOC").unwrap_or_else(|_| "backtracking".into());
-        flags.set("regalloc_algorithm", &regalloc).map_err(|e| e.to_string())?;
-        let isa = cranelift_native::builder()
-            .map_err(|e| e.to_string())?
-            .finish(settings::Flags::new(flags))
-            .map_err(|e| e.to_string())?;
+        let isa = make_isa(&regalloc)?;
+        let fast_isa = make_isa("single_pass")?;
 
         let ptr = isa.pointer_type();
         let mut helper_sig = Signature::new(isa.default_call_conv());
@@ -240,6 +248,7 @@ impl Compiler {
         Ok(Compiler {
             cache: None,
             isa,
+            fast_isa,
             ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
             helper_sig,
@@ -257,12 +266,11 @@ impl Compiler {
         self.stats.clone()
     }
 
-    /// Compiles `self.ctx.func` to machine code.
-    fn finish(&mut self) -> Result<Vec<u8>, String> {
-        let code = self
-            .ctx
-            .compile(&*self.isa, &mut ControlPlane::default())
-            .map_err(|e| format!("{:?}", e.inner))?;
+    /// Compiles `self.ctx.func` to machine code (with the fast register allocator if `fast`).
+    fn finish(&mut self, fast: bool) -> Result<Vec<u8>, String> {
+        let isa = if fast { self.fast_isa.clone() } else { self.isa.clone() };
+        let code =
+            self.ctx.compile(&*isa, &mut ControlPlane::default()).map_err(|e| format!("{:?}", e.inner))?;
         // All calls and jumps are indirect through absolute addresses, so nothing to relocate.
         assert!(code.buffer.relocs().is_empty(), "generated code needs relocation");
         let bytes = code.code_buffer();
@@ -273,7 +281,7 @@ impl Compiler {
     /// Generates the entry trampoline into `cache`.
     pub(crate) fn emit_entry(&mut self, cache: &mut cache::CodeCache) -> Result<JitEntry, String> {
         self.build_entry_function();
-        let bytes = self.finish()?;
+        let bytes = self.finish(false)?;
         let entry = cache.install(&bytes).ok_or("code cache full")?;
         // SAFETY: generated with the `JitEntry` signature in the platform calling convention.
         Ok(unsafe { std::mem::transmute::<*const u8, JitEntry>(entry) })
@@ -330,6 +338,8 @@ pub(crate) struct Generated {
     bytes: Vec<u8>,
     /// The code's chain slots; the code holds their addresses.
     slots: Box<[ChainSlot]>,
+    /// Address of the first-tier hooks in `slots`, or 0.
+    hooks: u64,
 }
 
 impl Compiler {
@@ -341,7 +351,7 @@ impl Compiler {
             return Compiled::CacheFull;
         };
         self.slots.push(generated.slots);
-        Compiled::Code(code as JitCode)
+        Compiled::Code(CodeRef { code: code as JitCode, hooks: generated.hooks })
     }
 
     /// Translates (a prefix of) `insns`. `None` if not even the first instruction can be.
@@ -376,12 +386,23 @@ impl Compiler {
 
         self.ctx.clear();
         self.ctx.func = Function::with_name_signature(Default::default(), self.block_sig.clone());
-        // Each guest block has at most two static exits.
-        let mut slots: Box<[ChainSlot]> = (0..2 * blocks.len()).map(|_| ChainSlot::default()).collect();
+        // Each guest block has at most two static exits; first-tier code also gets its hooks
+        // (an execution counter and a redirect, see `rv_core::jit::CodeRef`) in two more.
+        let first_tier = info.tier == 1;
+        let exits = 2 * blocks.len();
+        let hook_slots = if first_tier { 2 } else { 0 };
+        let mut slots: Box<[ChainSlot]> = (0..exits + hook_slots).map(|_| ChainSlot::default()).collect();
         for slot in slots.iter_mut() {
             slot.page = info.page as u32;
         }
-        let slot_addrs: Vec<i64> = slots.iter().map(|s| s as *const ChainSlot as i64).collect();
+        let hooks = if first_tier {
+            slots[exits].target = hotness() as u64;
+            &slots[exits] as *const ChainSlot as u64
+        } else {
+            0
+        };
+        const _: () = assert!(size_of::<ChainSlot>() as u64 == rv_core::jit::HOOK_REDIRECT);
+        let slot_addrs: Vec<i64> = slots[..exits].iter().map(|s| s as *const ChainSlot as i64).collect();
         let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
         let block_sig_ref = b.import_signature(self.block_sig.clone());
         let helper_sig_ref = b.import_signature(self.helper_sig.clone());
@@ -414,6 +435,8 @@ impl Compiler {
             page_offset: (info.host & (rv_core::mem::PAGE_SIZE - 1)) as i64,
             vlenb: info.vlenb,
             vconfig: None,
+            vtype_guess: rv_core::vector::vlmax_for(info.vtype, info.vlenb as usize).map(|_| info.vtype),
+            guess_ok: None,
             dirty: 0,
             flushed: 0,
             pending,
@@ -427,6 +450,9 @@ impl Compiler {
             chaining: self.chaining,
             jump_cache: self.jump_cache,
         };
+        if first_tier {
+            t.tier_prologue(hooks, info.host);
+        }
         let all: Vec<Insn> = blocks.iter().flat_map(|(_, insns, _)| insns.iter().copied()).collect();
         t.load_registers(&all);
         t.pc0 = t.b.ins().load(I64, t.trusted, state, abi::PC as i32);
@@ -441,6 +467,7 @@ impl Compiler {
             t.block_start = block_offset;
             t.flushed = 0;
             t.vconfig = None;
+            t.guess_ok = None;
             let mut offset = block_offset;
             let mut ended = false;
             for (i, insn) in insns.iter().enumerate() {
@@ -461,7 +488,7 @@ impl Compiler {
         }
         t.b.seal_all_blocks();
         t.b.finalize(self.isa.frontend_config());
-        let bytes = match self.finish() {
+        let bytes = match self.finish(first_tier) {
             Ok(bytes) => bytes,
             Err(e) => {
                 eprintln!("rv-jit: code generation failed: {e}\r");
@@ -473,8 +500,15 @@ impl Compiler {
         self.stats.blocks.fetch_add(1, Ordering::Relaxed);
         self.stats.instructions.fetch_add(all.len() as u64, Ordering::Relaxed);
         self.stats.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        Some(Generated { bytes, slots })
+        Some(Generated { bytes, slots, hooks })
     }
+}
+
+/// Executions of first-tier code before the hart asks for second-tier code
+/// (`RV_JIT_HOT` overrides it, for tuning).
+fn hotness() -> i64 {
+    static HOT: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *HOT.get_or_init(|| std::env::var("RV_JIT_HOT").ok().and_then(|v| v.parse().ok()).unwrap_or(1000))
 }
 
 struct Translator<'a> {
@@ -497,6 +531,11 @@ struct Translator<'a> {
     vlenb: u32,
     /// Vector configuration set by a native VSETVLI earlier in the current guest block.
     vconfig: Option<vector::Vconfig>,
+    /// `vtype` at compile time, if valid: vector instructions in blocks without a VSETVLI
+    /// are compiled for it, behind a check.
+    vtype_guess: Option<u64>,
+    /// That check for the current guest block, once computed.
+    guess_ok: Option<Value>,
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
@@ -526,6 +565,34 @@ const fn reg_offset(r: u8) -> i32 {
 }
 
 impl Translator<'_> {
+    /// First-tier code: jump to second-tier code once there is some, and count executions,
+    /// leaving for the dispatcher (to ask for second-tier code) when the count runs out.
+    fn tier_prologue(&mut self, hooks: u64, host: u64) {
+        let t = self.trusted;
+        let hooks_v = self.b.ins().iconst(I64, hooks as i64);
+        let redirect = self.b.ins().load(I64, t, hooks_v, rv_core::jit::HOOK_REDIRECT as i32);
+        let (upgraded, count, hot, run) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(redirect, upgraded, &[], count, &[]);
+        self.b.switch_to_block(upgraded);
+        self.b.ins().return_call_indirect(self.block_sig_ref, redirect, &[self.state, self.hart]);
+
+        self.b.switch_to_block(count);
+        let left = self.b.ins().load(I64, t, hooks_v, 0);
+        let left = self.b.ins().iadd_imm_s(left, -1);
+        self.b.ins().store(t, left, hooks_v, 0);
+        let ran_out = self.b.ins().icmp_imm_s(IntCC::Equal, left, 0);
+        self.b.ins().brif(ran_out, hot, &[], run, &[]);
+        // Nothing has run yet: pc is this block's, and no registers changed.
+        self.b.switch_to_block(hot);
+        let host_v = self.b.ins().iconst(I64, host as i64);
+        self.b.ins().store(t, host_v, self.state, abi::JIT_TIERUP as i32);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().store(t, zero, self.state, abi::JIT_CHAIN_FROM as i32);
+        self.b.ins().return_(&[zero]);
+        self.b.switch_to_block(run);
+    }
+
     /// Declares a variable per register and loads those the region reads or writes. Every
     /// register written somewhere counts as dirty on every exit: the region's paths differ.
     fn load_registers(&mut self, insns: &[Insn]) {
@@ -807,6 +874,8 @@ impl Translator<'_> {
         self.b.def_var(self.pending, rebase);
         if matches!(insn.op, Op::Vsetvli | Op::Vsetivli | Op::Vsetvl) {
             self.vconfig = None;
+            self.guess_ok = None;
+            self.vtype_guess = None;
         }
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         self.b.ins().store(t, pc, self.state, abi::PC as i32);
@@ -840,6 +909,42 @@ impl Translator<'_> {
     ) {
         self.exec_via_helper(insn, index, offset);
         self.b.ins().jump(done, &[]);
+    }
+
+    /// A vector instruction in a block that did not set the vector configuration: native code
+    /// for the configuration seen at compile time if it still holds, the helper otherwise.
+    fn guessed_vector(&mut self, insn: &Insn, index: u64, offset: i64) {
+        let guess = self.vtype_guess.unwrap();
+        let ok = match self.guess_ok {
+            Some(ok) => ok,
+            None => {
+                let t = self.trusted;
+                let vtype = self.b.ins().load(I64, t, self.state, abi::VTYPE as i32);
+                let same = self.b.ins().icmp_imm_s(IntCC::Equal, vtype, guess as i64);
+                let vstart = self.b.ins().load(I64, t, self.state, abi::VSTART as i32);
+                let at_start = self.b.ins().icmp_imm_s(IntCC::Equal, vstart, 0);
+                let mstatus = self.b.ins().load(I64, t, self.state, abi::MSTATUS as i32);
+                let vs = self.b.ins().band_imm_s(mstatus, rv_core::csr::status::VS as i64);
+                let on = self.b.ins().icmp_imm_s(IntCC::NotEqual, vs, 0);
+                let ok = self.b.ins().band(same, at_start);
+                let ok = self.b.ins().band(ok, on);
+                self.guess_ok = Some(ok);
+                ok
+            }
+        };
+        let (native, helper, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(ok, native, &[], helper, &[]);
+        self.b.switch_to_block(native);
+        self.vconfig = Some(vector::Vconfig::from_vtype(guess));
+        if !self.translate_vector(insn, index, offset) {
+            self.exec_via_helper(insn, index, offset);
+        }
+        self.vconfig = None;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(helper);
+        self.exec_via_helper(insn, index, offset);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
     }
 
     /// VSETVLI/VSETIVLI with a valid immediate `vtype` (so a known VLMAX).
@@ -884,6 +989,7 @@ impl Translator<'_> {
         self.b.ins().store(t, dirty, self.state, abi::MSTATUS as i32);
         self.set(insn.rd, vl);
         self.vconfig = Some(vector::Vconfig::from_vtype(vtype));
+        self.guess_ok = None;
     }
 
     fn zext32(&mut self, v: Value) -> Value {
@@ -1421,7 +1527,11 @@ impl Translator<'_> {
                     None => self.exec_via_helper(insn, index, offset),
                 }
             }
-            Op::Vop | Op::Vload | Op::Vstore if self.translate_vector(insn, index, offset) => {}
+            Op::Vop | Op::Vload | Op::Vstore
+                if self.vconfig.is_some() && self.translate_vector(insn, index, offset) => {}
+            Op::Vop | Op::Vload | Op::Vstore if self.vconfig.is_none() && self.vtype_guess.is_some() => {
+                self.guessed_vector(insn, index, offset)
+            }
             _ => self.exec_via_helper(insn, index, offset),
         }
         false

@@ -43,3 +43,11 @@ fn vsetvli_traps_when_the_vector_unit_is_off() {
         );
     }
 }
+
+/// `vguess.S`: vector code compiled for one configuration must check it at run time.
+#[test]
+fn vector_code_checks_the_configuration_it_was_compiled_for() {
+    for threshold in [1, 2, 16] {
+        assert_eq!(run(include_bytes!("vguess.bin"), threshold), Shutdown::PowerOff, "threshold {threshold}");
+    }
+}

@@ -38,6 +38,10 @@ pub(crate) struct Block {
     pub fence_epoch: u32,
     /// The region the compiled code was made from (all of which must still match memory).
     pub region: Option<Arc<Region>>,
+    /// Tier of `jit` (see [`crate::jit::BlockInfo::tier`]); 0 before any.
+    pub tier: u8,
+    /// Hooks of first-tier code (see [`crate::jit::CodeRef`]).
+    pub hooks: u64,
 }
 
 impl Block {
@@ -51,6 +55,8 @@ impl Block {
             jit_pending: false,
             fence_epoch,
             region: None,
+            tier: 0,
+            hooks: 0,
         }
     }
 

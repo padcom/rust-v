@@ -46,6 +46,8 @@ pub struct JitState {
     pub exit_request: u64,
     /// Incremented by FENCE.I; chain slots record the epoch they were linked at.
     pub fence_epoch: u32,
+    /// Host address of a first-tier block whose execution counter ran out, or 0.
+    pub tierup: u64,
     pub jump_cache: [JumpCacheEntry; JUMP_CACHE_ENTRIES],
 }
 
@@ -57,6 +59,7 @@ impl Default for JitState {
             chain_from: 0,
             exit_request: 0,
             fence_epoch: 0,
+            tierup: 0,
             jump_cache: [JumpCacheEntry::default(); JUMP_CACHE_ENTRIES],
         }
     }
@@ -113,16 +116,35 @@ pub struct BlockInfo {
     pub cache_epoch: u32,
     /// Vector register length in bytes.
     pub vlenb: u32,
+    /// `vtype` when compilation was requested: compiled code may specialise on it (behind a
+    /// runtime check).
+    pub vtype: u64,
+    /// 1: the block alone, compiled quickly, counting its executions; 2: its region,
+    /// optimised, for blocks that turned out hot.
+    pub tier: u8,
 }
 
 // SAFETY: the generation pointer refers to the bus, which outlives every hart and compiler.
 unsafe impl Send for BlockInfo {}
 
+/// Compiled code and, for first-tier code, the address of its hooks: an execution counter
+/// (an `i64` at `hooks`) that sends the hart back to ask for second-tier code when it runs
+/// out, and a redirect (a code address at `hooks + HOOK_REDIRECT`) to second-tier code,
+/// which the first-tier code jumps to once set. 0 when there are none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeRef {
+    pub code: JitCode,
+    pub hooks: u64,
+}
+
+/// Offset of the redirect within a code's hooks.
+pub const HOOK_REDIRECT: u64 = 16;
+
 /// Outcome of a compilation request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Compiled {
     /// Code for (a prefix of) the block.
-    Code(JitCode),
+    Code(CodeRef),
     /// Not even the first instruction is supported.
     Unsupported,
     /// Compiling in the background; the result arrives through [`BlockCompiler::poll`].
@@ -192,6 +214,7 @@ pub mod abi {
     pub const TLB_SIZE: usize = TLB_ENTRIES;
     pub const JIT: usize = offset_of!(HartState, jit);
     pub const JIT_RETIRED: usize = JIT + offset_of!(JitState, retired);
+    pub const JIT_TIERUP: usize = JIT + offset_of!(JitState, tierup);
     pub const JIT_BUDGET: usize = JIT + offset_of!(JitState, budget);
     pub const JIT_CHAIN_FROM: usize = JIT + offset_of!(JitState, chain_from);
     pub const JIT_EXIT_REQUEST: usize = JIT + offset_of!(JitState, exit_request);

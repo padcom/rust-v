@@ -13,7 +13,9 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use rv_core::jit::{BlockCompiler, BlockInfo, ChainSlot, Compiled, Enter, JitCode, JitEntry, Region};
+use rv_core::jit::{
+    BlockCompiler, BlockInfo, ChainSlot, CodeRef, Compiled, Enter, JitCode, JitEntry, Region,
+};
 
 use crate::cache::CodeCache;
 use crate::{Compiler, Stats};
@@ -25,10 +27,11 @@ enum Entry {
     /// Being compiled for the given page generation.
     Pending(u32),
     /// Compiled for the given page generation (`None`: cannot be compiled).
-    Done(u32, Option<JitCode>),
+    Done(u32, Option<CodeRef>),
 }
 
-type Key = (u64, u8);
+/// Host address, data privilege and tier.
+type Key = (u64, u8, u8);
 
 struct Job {
     region: Arc<Region>,
@@ -119,7 +122,7 @@ impl JitPool {
     }
 
     fn shard(&self, key: Key) -> &Mutex<HashMap<Key, Entry>> {
-        &self.table[((key.0 >> 1) as usize ^ key.1 as usize) % SHARDS]
+        &self.table[((key.0 >> 1) as usize ^ key.1 as usize ^ key.2 as usize) % SHARDS]
     }
 
     fn worker(&self, mut compiler: Compiler) {
@@ -146,7 +149,7 @@ impl JitPool {
                 Some(g) => match installed.cache.install(&g.bytes) {
                     Some(code) => {
                         installed.slots.push(g.slots);
-                        Some(code as JitCode)
+                        Some(CodeRef { code: code as JitCode, hooks: g.hooks })
                     }
                     None => {
                         self.reset(&mut installed);
@@ -156,7 +159,7 @@ impl JitPool {
             };
             // Resets happen under `installed`, so the generation cannot change under us here.
             if job.cache_generation == self.generation.load(Ordering::Relaxed) {
-                let key = (job.info.host, job.info.data_priv as u8);
+                let key = (job.info.host, job.info.data_priv as u8, job.info.tier);
                 self.shard(key).lock().unwrap().insert(key, Entry::Done(job.info.generation, code));
             }
             drop(installed);
@@ -201,7 +204,7 @@ pub struct PoolHandle {
 
 impl BlockCompiler for PoolHandle {
     fn compile(&mut self, region: &Arc<Region>, info: BlockInfo) -> Compiled {
-        let key = (info.host, info.data_priv as u8);
+        let key = (info.host, info.data_priv as u8, info.tier);
         let mut shard = self.pool.shard(key).lock().unwrap();
         match shard.get(&key) {
             Some(&Entry::Done(g, code)) if g == info.generation => {
@@ -230,7 +233,7 @@ impl BlockCompiler for PoolHandle {
             let pool = &self.pool;
             let ready = &mut self.ready;
             self.pending.retain(|info| {
-                let key = (info.host, info.data_priv as u8);
+                let key = (info.host, info.data_priv as u8, info.tier);
                 let result = match pool.shard(key).lock().unwrap().get(&key) {
                     Some(&Entry::Pending(g)) if g == info.generation => return true,
                     Some(&Entry::Done(g, code)) if g == info.generation => {

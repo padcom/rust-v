@@ -4,10 +4,12 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use rv_isa::{Insn, Op, decode};
 
-use crate::block::{Block, RegionBlock, decode_block, decode_region};
+use crate::block::{Block, Region, RegionBlock, decode_block, decode_region};
 use crate::csr::status;
 use crate::hart::{Hart, Priv, Reservation};
-use crate::jit::{BlockInfo, ChainSlot, Compiled, Enter, JitCode, JumpCacheEntry, jump_cache_index};
+use crate::jit::{
+    BlockInfo, ChainSlot, CodeRef, Compiled, Enter, HOOK_REDIRECT, JitCode, JumpCacheEntry, jump_cache_index,
+};
 use crate::mem::PAGE_SIZE;
 use crate::mmu::Access;
 use crate::trap::{Exception, cause};
@@ -88,7 +90,12 @@ impl Hart {
                         let page = self.bus.ram_page_of(host);
                         self.link_chain(page, code);
                         self.fill_jump_cache(block, host, page, code);
-                        self.run_compiled(code, budget)
+                        let n = self.run_compiled(code, budget);
+                        let hot = std::mem::take(&mut self.state.jit.tierup);
+                        if hot != 0 {
+                            self.tier_up(hot as *const u8);
+                        }
+                        n
                     });
                     self.compiler.as_mut().unwrap().leave();
                     if let Some(n) = ran {
@@ -202,10 +209,8 @@ impl Hart {
         let host = self.blocks.host(block);
         let entry = RegionBlock { offset: (host as u64 & (PAGE_SIZE - 1)) as u16, insns };
         let page = self.bus.ram_page_of(host);
-        let page_host = (host as usize & !(PAGE_SIZE as usize - 1)) as *const u8;
-        // SAFETY: the block was decoded from this page of guest RAM.
-        let region = std::sync::Arc::new(unsafe { decode_region(page_host, entry) });
-        self.blocks.block_mut(block).region = Some(region.clone());
+        // First tier: the block alone.
+        let region = std::sync::Arc::new(Region { blocks: vec![entry] });
         let info = BlockInfo {
             host: host as u64,
             data_priv,
@@ -214,13 +219,17 @@ impl Hart {
             page,
             cache_epoch: self.jit_cache_epoch,
             vlenb: self.vlenb() as u32,
+            vtype: self.state.csr.vtype,
+            tier: 1,
         };
         let result = self.compiler.as_mut().unwrap().compile(&region, info);
         let b = self.blocks.block_mut(block);
         match result {
             Compiled::Code(code) => {
-                b.jit = Some((code, data_priv));
-                Some(code)
+                b.jit = Some((code.code, data_priv));
+                b.tier = 1;
+                b.hooks = code.hooks;
+                Some(code.code)
             }
             Compiled::Unsupported => {
                 b.jit_failed = true;
@@ -243,6 +252,8 @@ impl Hart {
         for b in self.blocks.blocks_mut() {
             b.jit = None;
             b.region = None;
+            b.tier = 0;
+            b.hooks = 0;
             b.jit_pending = false;
             b.jit_failed = false;
             b.hits = 0;
@@ -273,11 +284,73 @@ impl Hart {
                 continue;
             }
             b.jit_pending = false;
-            match result {
-                Compiled::Code(code) => b.jit = Some((code, info.data_priv)),
+            match (info.tier, result) {
+                (1, Compiled::Code(code)) => {
+                    b.jit = Some((code.code, info.data_priv));
+                    b.tier = 1;
+                    b.hooks = code.hooks;
+                }
+                (_, Compiled::Code(code)) => Self::install_tier2(b, code, info.data_priv),
+                // Keep the first-tier code if the region cannot be compiled.
+                (2, _) => b.tier = 2,
                 _ => b.jit_failed = true,
             }
         }
+    }
+
+    /// Requests second-tier code for the first-tier block at `host`, whose execution counter
+    /// ran out.
+    fn tier_up(&mut self, host: *const u8) {
+        let Some(idx) = self.blocks.get(host) else { return };
+        let b = self.blocks.block(idx);
+        let Some((_, data_priv)) = b.jit else { return };
+        if b.tier != 1 || b.jit_pending || data_priv != self.data_priv() {
+            return;
+        }
+        let entry = RegionBlock { offset: (host as u64 & (PAGE_SIZE - 1)) as u16, insns: b.insns.clone() };
+        let generation = b.generation;
+        let page = self.bus.ram_page_of(host);
+        let page_host = (host as usize & !(PAGE_SIZE as usize - 1)) as *const u8;
+        // SAFETY: the block was decoded from this page of guest RAM.
+        let region = std::sync::Arc::new(unsafe { decode_region(page_host, entry) });
+        let info = BlockInfo {
+            host: host as u64,
+            data_priv,
+            page_generation: self.bus.code().generation_ptr(page),
+            generation,
+            page,
+            cache_epoch: self.jit_cache_epoch,
+            vlenb: self.vlenb() as u32,
+            vtype: self.state.csr.vtype,
+            tier: 2,
+        };
+        self.blocks.block_mut(idx).region = Some(region.clone());
+        let result = self.compiler.as_mut().unwrap().compile(&region, info);
+        let b = self.blocks.block_mut(idx);
+        match result {
+            Compiled::Code(code) => Self::install_tier2(b, code, data_priv),
+            Compiled::Pending => {
+                b.jit_pending = true;
+                self.jit_pending += 1;
+            }
+            Compiled::Unsupported => b.tier = 2,
+            Compiled::CacheFull => self.flush_jit(),
+        }
+    }
+
+    /// Switches a block to its second-tier code, and points its first-tier code there too
+    /// (chain links and jump-cache entries elsewhere still lead to it).
+    fn install_tier2(b: &mut Block, code: CodeRef, data_priv: crate::hart::Priv) {
+        if b.hooks != 0 {
+            // SAFETY: the hooks belong to the block's first-tier code, which is still in the
+            // code cache (it is only emptied after every hart dropped its references).
+            unsafe {
+                AtomicU64::from_ptr((b.hooks + HOOK_REDIRECT) as *mut u64).store(code.code, Ordering::Release)
+            };
+        }
+        b.jit = Some((code.code, data_priv));
+        b.tier = 2;
+        b.hooks = 0;
     }
 
     /// If the last compiled block left through an unlinked chain slot and `code` is in the
