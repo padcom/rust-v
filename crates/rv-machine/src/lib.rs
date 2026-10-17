@@ -148,6 +148,8 @@ pub struct Machine {
     pub tablet: Option<virtio::input::InputHandle>,
     /// Where the sound device's playback goes, when there is one.
     pub audio: Option<Arc<virtio::snd::AudioRing>>,
+    /// Host addresses of the network's TCP forwards, in configuration order.
+    pub forwarded: Vec<std::net::SocketAddr>,
     pub power: Arc<power::PowerState>,
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
@@ -236,10 +238,12 @@ impl Machine {
             let id = format!("rust-v-disk{i}");
             virtio_devices.push(Box::new(virtio::blk::Blk::new(drive.backend, drive.read_only, &id)));
         }
+        let mut forwarded = Vec::new();
         if let Some(net_config) = config.net {
             let (mut net, rx) = virtio::net::Net::new(net_config.guest_mac);
             let backend = rv_net::UserNet::spawn(net_config, Box::new(move |frame| rx.receive(frame)))
                 .map_err(|e| Error::Layout(format!("user-mode networking: {e}")))?;
+            forwarded = backend.forwarded().to_vec();
             net.set_backend(Box::new(backend));
             virtio_devices.push(Box::new(net));
         }
@@ -342,7 +346,8 @@ impl Machine {
             // compilation (for comparisons) gives each hart its own compiler.
             let pool = if config.jit_background {
                 let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
-                let workers = num_harts.min(cores.saturating_sub(num_harts)).max(1);
+                // Desktops compile a lot of code (guest JITs, browsers): use spare host cores.
+                let workers = (2 * num_harts).min(cores.saturating_sub(num_harts)).max(1);
                 // One cache as big as the per-hart caches together (virtual memory until used).
                 let cache_size = config.jit_cache_size.saturating_mul(num_harts);
                 let pool = rv_jit::pool::JitPool::new(num_harts, workers, cache_size).map_err(Error::Jit)?;
@@ -377,6 +382,7 @@ impl Machine {
             keyboard,
             tablet,
             audio,
+            forwarded,
             power,
             dtb,
             stats: Stats::default(),

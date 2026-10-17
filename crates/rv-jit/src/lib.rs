@@ -188,7 +188,11 @@ fn supported(op: Op) -> bool {
     )
 }
 
-/// Default size of each compiler's code cache.
+/// Default size of each hart's share of the code cache. Unix hosts map it lazily; Windows
+/// commits the whole cache up front, so it gets less.
+#[cfg(unix)]
+pub const CODE_CACHE_SIZE: usize = 512 << 20;
+#[cfg(not(unix))]
 pub const CODE_CACHE_SIZE: usize = 256 << 20;
 
 impl Compiler {

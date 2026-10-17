@@ -95,8 +95,8 @@ fn rv_jit_cache_default() -> usize {
 fn boot(jit: bool, jit_cache_size: usize) {
     let console = Capture::default();
     let mut disk = vec![0u8; 4 << 20];
-    // A free host port to forward to the guest's port 8080.
-    let forward = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    // Any free host port, forwarded to the guest's port 8080.
+    let forward: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
     disk[..16].copy_from_slice(b"RUST-V DISK TEST");
     let config = MachineConfig {
         drives: vec![Drive { backend: Box::new(disk), read_only: false }],
@@ -111,6 +111,7 @@ fn boot(jit: bool, jit_cache_size: usize) {
         ..MachineConfig::default()
     };
     let mut machine = Machine::new(config, Box::new(console.clone())).unwrap();
+    let forward = machine.forwarded[0];
     let uart = machine.uart.clone();
     let runner = std::thread::spawn(move || machine.run());
 

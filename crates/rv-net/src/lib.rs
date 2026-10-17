@@ -65,6 +65,7 @@ pub type Sink = Box<dyn FnMut(Vec<u8>) + Send>;
 pub struct UserNet {
     to_stack: Sender<Vec<u8>>,
     waker: Arc<Waker>,
+    forwarded: Vec<SocketAddr>,
 }
 
 impl UserNet {
@@ -74,8 +75,15 @@ impl UserNet {
         let waker = Arc::new(Waker::new(poll.registry(), WAKER)?);
         let (to_stack, from_guest) = mpsc::channel();
         let mut stack = Stack::new(config, poll, waker.clone(), from_guest, sink)?;
+        let forwarded = stack.forwarded.clone();
         std::thread::Builder::new().name("usernet".into()).spawn(move || stack.run())?;
-        Ok(UserNet { to_stack, waker })
+        Ok(UserNet { to_stack, waker, forwarded })
+    }
+
+    /// The host addresses of the TCP forwards, in configuration order (a forward from port 0
+    /// gets a free port).
+    pub fn forwarded(&self) -> &[SocketAddr] {
+        &self.forwarded
     }
 
     /// Sends a frame from the guest.
@@ -174,6 +182,8 @@ struct Stack {
     epoch: Instant,
     /// Guest-side source ports for forwarded connections.
     next_forward_port: u16,
+    /// Where the forwards listen.
+    forwarded: Vec<SocketAddr>,
 }
 
 impl Stack {
@@ -215,9 +225,11 @@ impl Stack {
             next_token: 1,
             epoch,
             next_forward_port: 40000,
+            forwarded: Vec::new(),
         };
         for (host, guest_port) in stack.config.tcp_forwards.clone() {
             let mut listener = mio::net::TcpListener::bind(host)?;
+            stack.forwarded.push(listener.local_addr()?);
             let token = stack.token();
             stack.poll.registry().register(&mut listener, token, Interest::READABLE)?;
             stack.listeners.insert(token, (listener, guest_port));
