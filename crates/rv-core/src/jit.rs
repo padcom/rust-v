@@ -203,6 +203,8 @@ pub mod abi {
     pub const X: usize = offset_of!(HartState, x);
     pub const PC: usize = offset_of!(HartState, pc);
     pub const V: usize = offset_of!(HartState, v);
+    pub const F: usize = offset_of!(HartState, f);
+    pub const FCSR: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, fcsr);
     pub const MSTATUS: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, mstatus);
     pub const VL: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vl);
     pub const VTYPE: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vtype);

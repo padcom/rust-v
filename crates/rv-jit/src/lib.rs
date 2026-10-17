@@ -11,6 +11,7 @@
 mod cache;
 pub mod pool;
 mod vector;
+mod vector_fp;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,6 +54,8 @@ pub struct Compiler {
     isa: Arc<dyn TargetIsa>,
     /// Same target, with the faster register allocator (first-tier code).
     fast_isa: Arc<dyn TargetIsa>,
+    /// The host has fused multiply-add.
+    has_fma: bool,
     /// Own code cache; workers of a shared [`pool::JitPool`] have none.
     cache: Option<cache::CodeCache>,
     ctx: Context,
@@ -220,6 +223,8 @@ impl Compiler {
             flags.set("is_pic", "false").map_err(|e| e.to_string())?;
             flags.set("enable_verifier", "false").map_err(|e| e.to_string())?;
             flags.set("regalloc_algorithm", regalloc).map_err(|e| e.to_string())?;
+            // The x86-64 backend implements tail calls (block chaining) only with frame pointers.
+            flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
             cranelift_native::builder()
                 .map_err(|e| e.to_string())?
                 .finish(settings::Flags::new(flags))
@@ -253,6 +258,7 @@ impl Compiler {
             cache: None,
             isa,
             fast_isa,
+            has_fma: host_has_fma(),
             ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
             helper_sig,
@@ -441,6 +447,7 @@ impl Compiler {
             vconfig: None,
             vtype_guess: rv_core::vector::vlmax_for(info.vtype, info.vlenb as usize).map(|_| info.vtype),
             guess_ok: None,
+            has_fma: self.has_fma,
             dirty: 0,
             flushed: 0,
             pending,
@@ -508,6 +515,17 @@ impl Compiler {
     }
 }
 
+fn host_has_fma() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::is_x86_feature_detected!("fma")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        cfg!(target_arch = "aarch64")
+    }
+}
+
 /// Executions of first-tier code before the hart asks for second-tier code
 /// (`RV_JIT_HOT` overrides it, for tuning).
 fn hotness() -> i64 {
@@ -540,6 +558,8 @@ struct Translator<'a> {
     vtype_guess: Option<u64>,
     /// That check for the current guest block, once computed.
     guess_ok: Option<Value>,
+    /// The host has fused multiply-add (native vector FMA).
+    has_fma: bool,
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,

@@ -98,6 +98,8 @@ impl JitPool {
                         Ok(compiler) => pool.worker(compiler),
                         Err(e) => eprintln!("rv-jit: worker {i}: {e}\r"),
                     }
+                    // Only reached on shutdown: a panic would leave the harts interpreting
+                    // forever without anyone noticing, so it aborts instead (see `worker`).
                 })
                 .map_err(|e| e.to_string())?;
         }
@@ -142,7 +144,14 @@ impl JitPool {
             if job.cache_generation != self.generation.load(Ordering::Acquire) {
                 continue; // queued before the cache was emptied: nobody waits for it any more
             }
-            let generated = compiler.generate(&job.region, job.info);
+            // A compiler panic is a bug; take the process down rather than leave the harts
+            // waiting for code that never comes.
+            let generated = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compiler.generate(&job.region, job.info)
+            })) {
+                Ok(g) => g,
+                Err(_) => std::process::abort(),
+            };
             let mut installed = self.installed.lock().unwrap();
             let code = match generated {
                 None => None,

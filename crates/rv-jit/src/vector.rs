@@ -37,19 +37,19 @@ impl Vconfig {
     }
 
     /// Registers in a group (fractional LMUL uses part of one register).
-    fn regs(self) -> u32 {
+    pub(crate) fn regs(self) -> u32 {
         if self.lmul > 0 { 1 << self.lmul } else { 1 }
     }
 
-    fn lanes(self) -> u32 {
+    pub(crate) fn lanes(self) -> u32 {
         VLENB / self.sew
     }
 
-    fn vector_type(self) -> Type {
+    pub(crate) fn vector_type(self) -> Type {
         lane_vector(self.sew)
     }
 
-    fn lane_type(self) -> Type {
+    pub(crate) fn lane_type(self) -> Type {
         match self.sew {
             1 => I8,
             2 => I16,
@@ -58,7 +58,7 @@ impl Vconfig {
         }
     }
 
-    fn vlmax(self) -> u32 {
+    pub(crate) fn vlmax(self) -> u32 {
         if self.lmul >= 0 { self.lanes() << self.lmul } else { self.lanes() >> -self.lmul }
     }
 }
@@ -104,22 +104,22 @@ impl Translator<'_> {
         (abi::V + (reg * VLENB) as usize) as i32
     }
 
-    fn load_vreg(&mut self, cfg: Vconfig, reg: u32) -> Value {
+    pub(crate) fn load_vreg(&mut self, cfg: Vconfig, reg: u32) -> Value {
         self.b.ins().load(cfg.vector_type(), self.trusted, self.state, Self::v_offset(reg))
     }
 
-    fn store_vreg(&mut self, value: Value, reg: u32) {
+    pub(crate) fn store_vreg(&mut self, value: Value, reg: u32) {
         self.b.ins().store(self.trusted, value, self.state, Self::v_offset(reg));
     }
 
-    fn vconst(&mut self, ty: Type, bytes: Vec<u8>) -> Value {
+    pub(crate) fn vconst(&mut self, ty: Type, bytes: Vec<u8>) -> Value {
         let c = self.b.func.dfg.constants.insert(ConstantData::from(bytes));
         self.b.ins().vconst(ty, c)
     }
 
     /// Lanes of register `r` of a group that are below `vl` (all-ones lanes), as a vector of
     /// the configuration's lane type.
-    fn body_mask(&mut self, cfg: Vconfig, r: u32, vl: Value) -> Value {
+    pub(crate) fn body_mask(&mut self, cfg: Vconfig, r: u32, vl: Value) -> Value {
         let lanes = cfg.lanes();
         let mut bytes = Vec::with_capacity(16);
         for i in 0..lanes {
@@ -132,7 +132,7 @@ impl Translator<'_> {
         self.b.ins().icmp(IntCC::UnsignedLessThan, index, limit)
     }
 
-    fn load_vl(&mut self) -> Value {
+    pub(crate) fn load_vl(&mut self) -> Value {
         self.b.ins().load(I64, self.trusted, self.state, abi::VL as i32)
     }
 
@@ -162,6 +162,9 @@ impl Translator<'_> {
         }
         match insn.op {
             Op::Vload | Op::Vstore => self.vector_memory(cfg, insn, index, offset),
+            Op::Vop if matches!((insn.raw >> 12) & 7, 1 | 5) => {
+                self.translate_vector_fp(cfg, insn, index, offset)
+            }
             Op::Vop => self.vector_op(cfg, insn),
             _ => false,
         }
@@ -337,7 +340,7 @@ impl Translator<'_> {
     }
 
     /// Lanes of register `r` of a group whose bit in the mask register v0 is set.
-    fn active_lanes(&mut self, cfg: Vconfig, r: u32) -> Value {
+    pub(crate) fn active_lanes(&mut self, cfg: Vconfig, r: u32) -> Value {
         let lanes = cfg.lanes();
         let first = r * lanes;
         let word = Self::v_offset(0) + (first / 64 * 8) as i32;
@@ -583,7 +586,7 @@ impl Translator<'_> {
     }
 
     /// The mask register `reg` as two 64-bit halves (VLEN = 128).
-    fn load_mask(&mut self, reg: u8) -> (Value, Value) {
+    pub(crate) fn load_mask(&mut self, reg: u8) -> (Value, Value) {
         let at = Self::v_offset(reg as u32);
         let lo = self.b.ins().load(I64, self.trusted, self.state, at);
         let hi = self.b.ins().load(I64, self.trusted, self.state, at + 8);
@@ -591,7 +594,7 @@ impl Translator<'_> {
     }
 
     /// Bits below `vl`, as two 64-bit halves.
-    fn vl_bits(&mut self, vl: Value) -> (Value, Value) {
+    pub(crate) fn vl_bits(&mut self, vl: Value) -> (Value, Value) {
         let b = &mut self.b;
         let one = b.ins().iconst(I64, 1);
         let all = b.ins().iconst(I64, -1);
@@ -613,7 +616,7 @@ impl Translator<'_> {
     }
 
     /// Writes `bits` into mask register `vd` where `which` is set, leaving the rest.
-    fn store_mask_bits(&mut self, vd: u8, bits: (Value, Value), which: (Value, Value)) {
+    pub(crate) fn store_mask_bits(&mut self, vd: u8, bits: (Value, Value), which: (Value, Value)) {
         let (old_lo, old_hi) = self.load_mask(vd);
         let lo = self.b.ins().bitselect(which.0, bits.0, old_lo);
         let hi = self.b.ins().bitselect(which.1, bits.1, old_hi);
