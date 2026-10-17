@@ -9,6 +9,7 @@
 //! platform convention enters the first block of a chain.
 
 mod cache;
+pub mod pool;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,7 +48,8 @@ pub struct Stats {
 
 pub struct Compiler {
     isa: Arc<dyn TargetIsa>,
-    cache: cache::CodeCache,
+    /// Own code cache; workers of a shared [`pool::JitPool`] have none.
+    cache: Option<cache::CodeCache>,
     ctx: Context,
     fctx: FunctionBuilderContext,
     /// Signature of the `jit_load`/`jit_store` helpers (platform calling convention).
@@ -190,6 +192,16 @@ impl Compiler {
 
     /// A compiler whose code cache holds `cache_size` bytes.
     pub fn with_cache_size(cache_size: usize) -> Result<Self, String> {
+        let mut compiler = Self::bare(Arc::new(Stats::default()))?;
+        let mut cache = cache::CodeCache::new(cache_size)?;
+        compiler.entry = compiler.emit_entry(&mut cache)?;
+        cache.reserve_current();
+        compiler.cache = Some(cache);
+        Ok(compiler)
+    }
+
+    /// A compiler without a code cache, reporting into `stats`.
+    pub(crate) fn bare(stats: Arc<Stats>) -> Result<Self, String> {
         let mut flags = settings::builder();
         // Blocks are small; Cranelift's optimisations cost more compile time than they save.
         let opt = std::env::var("RV_JIT_OPT").unwrap_or_else(|_| "none".into());
@@ -221,8 +233,8 @@ impl Compiler {
         block_sig.params.extend([AbiParam::new(ptr), AbiParam::new(ptr)]);
         block_sig.returns.push(AbiParam::new(I64));
 
-        let mut compiler = Compiler {
-            cache: cache::CodeCache::new(cache_size)?,
+        Ok(Compiler {
+            cache: None,
             isa,
             ctx: Context::new(),
             fctx: FunctionBuilderContext::new(),
@@ -231,21 +243,18 @@ impl Compiler {
             block_sig,
             entry: dummy_entry,
             slots: Vec::new(),
-            stats: Arc::new(Stats::default()),
+            stats,
             chaining: std::env::var_os("RV_JIT_NO_CHAIN").is_none(),
             jump_cache: std::env::var_os("RV_JIT_NO_JUMP_CACHE").is_none(),
-        };
-        compiler.entry = compiler.build_entry()?;
-        compiler.cache.reserve_current();
-        Ok(compiler)
+        })
     }
 
     pub fn stats(&self) -> Arc<Stats> {
         self.stats.clone()
     }
 
-    /// Compiles `self.ctx.func` and copies it into the code cache.
-    fn emit(&mut self) -> Result<*const u8, String> {
+    /// Compiles `self.ctx.func` to machine code.
+    fn finish(&mut self) -> Result<Vec<u8>, String> {
         let code = self
             .ctx
             .compile(&*self.isa, &mut ControlPlane::default())
@@ -254,11 +263,20 @@ impl Compiler {
         assert!(code.buffer.relocs().is_empty(), "generated code needs relocation");
         let bytes = code.code_buffer();
         self.stats.code_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
-        self.cache.install(bytes).ok_or_else(|| "code cache full".to_string())
+        Ok(bytes.to_vec())
+    }
+
+    /// Generates the entry trampoline into `cache`.
+    pub(crate) fn emit_entry(&mut self, cache: &mut cache::CodeCache) -> Result<JitEntry, String> {
+        self.build_entry_function();
+        let bytes = self.finish()?;
+        let entry = cache.install(&bytes).ok_or("code cache full")?;
+        // SAFETY: generated with the `JitEntry` signature in the platform calling convention.
+        Ok(unsafe { std::mem::transmute::<*const u8, JitEntry>(entry) })
     }
 
     /// Builds the trampoline `entry(state, hart, code)` that calls a tail-convention block.
-    fn build_entry(&mut self) -> Result<JitEntry, String> {
+    fn build_entry_function(&mut self) {
         let ptr = self.isa.pointer_type();
         let mut sig = Signature::new(self.isa.default_call_conv());
         sig.params.extend([AbiParam::new(ptr), AbiParam::new(ptr), AbiParam::new(I64)]);
@@ -277,9 +295,6 @@ impl Compiler {
         let status = b.inst_results(call)[0];
         b.ins().return_(&[status]);
         b.finalize(self.isa.frontend_config());
-        let entry = self.emit()?;
-        // SAFETY: generated with the `JitEntry` signature in the platform calling convention.
-        Ok(unsafe { std::mem::transmute::<*const u8, JitEntry>(entry) })
     }
 }
 
@@ -298,14 +313,35 @@ impl BlockCompiler for Compiler {
     }
 
     fn reset(&mut self) {
-        self.cache.reset();
+        if let Some(cache) = self.cache.as_mut() {
+            cache.reset();
+        }
         self.slots.clear();
         self.stats.flushes.fetch_add(1, Ordering::Relaxed);
     }
 }
 
+/// Native code for one block, not yet placed in a code cache.
+pub(crate) struct Generated {
+    bytes: Vec<u8>,
+    /// The block's chain slots; the code holds their addresses.
+    slots: Box<[ChainSlot; 2]>,
+}
+
 impl Compiler {
     fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
+        let Some(generated) = self.generate(insns, info) else { return Compiled::Unsupported };
+        let Some(code) =
+            self.cache.as_mut().expect("compiler without a code cache").install(&generated.bytes)
+        else {
+            return Compiled::CacheFull;
+        };
+        self.slots.push(generated.slots);
+        Compiled::Code(code as JitCode)
+    }
+
+    /// Translates (a prefix of) `insns`. `None` if not even the first instruction can be.
+    pub(crate) fn generate(&mut self, insns: &[Insn], info: BlockInfo) -> Option<Generated> {
         let data_priv = info.data_priv;
         // Instructions the translator does not handle natively run through the interpreter
         // helper, as long as they cannot change control flow, privilege or translation.
@@ -320,7 +356,7 @@ impl Compiler {
         }
         if count == 0 {
             self.stats.rejected.fetch_add(1, Ordering::Relaxed);
-            return Compiled::Unsupported;
+            return None;
         }
         let insns = &insns[..count];
         let start = Instant::now();
@@ -332,7 +368,6 @@ impl Compiler {
             slot.page = info.page as u32;
         }
         let slot_addr = [&slots[0] as *const ChainSlot as i64, &slots[1] as *const ChainSlot as i64];
-        self.slots.push(slots);
         let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
         let block_sig_ref = b.import_signature(self.block_sig.clone());
         let helper_sig_ref = b.import_signature(self.helper_sig.clone());
@@ -391,95 +426,19 @@ impl Compiler {
         }
         t.b.seal_all_blocks();
         t.b.finalize(self.isa.frontend_config());
-        let code = match self.emit() {
-            Ok(code) => code,
-            Err(_) => return Compiled::CacheFull,
+        let bytes = match self.finish() {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                eprintln!("rv-jit: code generation failed: {e}\r");
+                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
         };
 
         self.stats.blocks.fetch_add(1, Ordering::Relaxed);
         self.stats.instructions.fetch_add(insns.len() as u64, Ordering::Relaxed);
         self.stats.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        Compiled::Code(code as JitCode)
-    }
-}
-
-/// A request to the background compiler thread.
-enum Request {
-    Compile { insns: Box<[Insn]>, info: BlockInfo },
-    Reset,
-}
-
-/// Compiles on a dedicated thread, so that the hart keeps interpreting a hot block until its
-/// code is ready instead of stalling for the compilation.
-pub struct ThreadedCompiler {
-    requests: std::sync::mpsc::Sender<Request>,
-    results: std::sync::mpsc::Receiver<(BlockInfo, Compiled)>,
-    entry: JitEntry,
-    stats: Arc<Stats>,
-}
-
-impl ThreadedCompiler {
-    pub fn new(name: &str) -> Result<Self, String> {
-        Self::with_cache_size(name, CODE_CACHE_SIZE)
-    }
-
-    pub fn with_cache_size(name: &str, cache_size: usize) -> Result<Self, String> {
-        let (requests, rx_requests) = std::sync::mpsc::channel::<Request>();
-        let (tx_results, results) = std::sync::mpsc::channel();
-        let (tx_init, rx_init) = std::sync::mpsc::channel();
-        std::thread::Builder::new()
-            .name(name.into())
-            .spawn(move || {
-                // The Cranelift module is created and used only on this thread.
-                let mut compiler = match Compiler::with_cache_size(cache_size) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        let _ = tx_init.send(Err(e));
-                        return;
-                    }
-                };
-                let _ = tx_init.send(Ok((compiler.entry, compiler.stats())));
-                // Runs until the hart (and with it the request sender) goes away.
-                while let Ok(req) = rx_requests.recv() {
-                    match req {
-                        Request::Compile { insns, info } => {
-                            let result = compiler.compile(&insns, info);
-                            if tx_results.send((info, result)).is_err() {
-                                break;
-                            }
-                        }
-                        Request::Reset => compiler.reset(),
-                    }
-                }
-            })
-            .map_err(|e| e.to_string())?;
-        let (entry, stats) = rx_init.recv().map_err(|e| e.to_string())??;
-        Ok(ThreadedCompiler { requests, results, entry, stats })
-    }
-
-    pub fn stats(&self) -> Arc<Stats> {
-        self.stats.clone()
-    }
-}
-
-impl BlockCompiler for ThreadedCompiler {
-    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
-        match self.requests.send(Request::Compile { insns: insns.into(), info }) {
-            Ok(()) => Compiled::Pending,
-            Err(_) => Compiled::Unsupported,
-        }
-    }
-
-    fn poll(&mut self) -> Option<(BlockInfo, Compiled)> {
-        self.results.try_recv().ok()
-    }
-
-    fn reset(&mut self) {
-        let _ = self.requests.send(Request::Reset);
-    }
-
-    fn entry(&self) -> JitEntry {
-        self.entry
+        Some(Generated { bytes, slots })
     }
 }
 

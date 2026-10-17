@@ -169,6 +169,11 @@ impl GpuHandle {
     }
 }
 
+fn trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("RV_GPU_TRACE").is_some())
+}
+
 fn u32_at(b: &[u8], at: usize) -> u32 {
     b.get(at..at + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
@@ -424,6 +429,16 @@ impl VirtioDevice for Gpu {
                 let req = read(chain);
                 let (kind, payload) =
                     if req.len() < HEADER { (cmd::ERR_UNSPEC, vec![]) } else { self.command(&a.mem, &req) };
+                if trace() {
+                    let t = u32_at(&req, 0);
+                    if !matches!(t, cmd::TRANSFER_TO_HOST_2D | cmd::RESOURCE_FLUSH) || kind >= cmd::ERR_UNSPEC
+                    {
+                        eprintln!(
+                            "virtio-gpu: {t:#06x} {:02x?} -> {kind:#06x}\r",
+                            &req[HEADER.min(req.len())..req.len().min(HEADER + 32)]
+                        );
+                    }
+                }
                 // The response header echoes the fence.
                 let mut resp = vec![0u8; HEADER];
                 resp[0..4].copy_from_slice(&kind.to_le_bytes());

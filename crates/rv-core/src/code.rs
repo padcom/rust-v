@@ -14,6 +14,8 @@ use crate::mem::PAGE_SHIFT;
 pub struct CodePages {
     bits: Box<[AtomicU64]>,
     generations: Box<[AtomicU32]>,
+    /// FENCE.I epoch shared by all harts (see [`CodePages::fence_epoch`]).
+    fence_epoch: AtomicU32,
 }
 
 impl CodePages {
@@ -22,7 +24,20 @@ impl CodePages {
         CodePages {
             bits: (0..pages.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(),
             generations: (0..pages).map(|_| AtomicU32::new(0)).collect(),
+            fence_epoch: AtomicU32::new(0),
         }
+    }
+
+    /// The machine-wide FENCE.I epoch. Each FENCE.I starts a new one; a hart re-checks cached
+    /// blocks against memory once per epoch. Harts adopt the latest epoch whenever they enter
+    /// the dispatcher, which only causes extra checks, and lets every hart share chain links.
+    pub fn fence_epoch(&self) -> u32 {
+        self.fence_epoch.load(Ordering::Acquire)
+    }
+
+    /// Starts a new FENCE.I epoch and returns it.
+    pub fn new_fence_epoch(&self) -> u32 {
+        self.fence_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1)
     }
 
     #[inline(always)]

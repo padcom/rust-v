@@ -143,10 +143,30 @@ pub trait BlockCompiler: Send {
     /// The trampoline used to enter compiled code.
     fn entry(&self) -> JitEntry;
 
-    /// Empties the code cache. The caller guarantees that no compiled code is running or
-    /// referenced any more. Requests made before the reset may still report results; their
-    /// `cache_epoch` identifies them.
+    /// Empties the code cache (or, for a shared one, acknowledges that it was emptied). The
+    /// caller guarantees that it no longer runs or references any compiled code. Requests made
+    /// before the reset may still report results; their `cache_epoch` identifies them.
     fn reset(&mut self) {}
+
+    /// Called before the hart uses compiled code (looking it up, linking it, running it);
+    /// after [`Enter::Go`], [`BlockCompiler::leave`] must follow. A code cache shared between
+    /// harts is only emptied while none of them is between the two.
+    fn enter(&mut self) -> Enter {
+        Enter::Go
+    }
+
+    fn leave(&mut self) {}
+}
+
+/// May the hart use compiled code now?
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Enter {
+    Go,
+    /// The code cache is being emptied; interpret for now.
+    Busy,
+    /// The code cache was emptied since the hart last looked: it must drop every reference to
+    /// compiled code (and call [`BlockCompiler::reset`]) before using any.
+    Stale,
 }
 
 /// Layout of [`HartState`] as seen by generated code.

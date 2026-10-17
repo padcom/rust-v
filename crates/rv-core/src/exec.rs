@@ -7,7 +7,7 @@ use rv_isa::{Insn, Op, decode};
 use crate::block::{Block, decode_block};
 use crate::csr::status;
 use crate::hart::{Hart, Priv, Reservation};
-use crate::jit::{BlockInfo, ChainSlot, Compiled, JitCode, JumpCacheEntry, jump_cache_index};
+use crate::jit::{BlockInfo, ChainSlot, Compiled, Enter, JitCode, JumpCacheEntry, jump_cache_index};
 use crate::mem::PAGE_SIZE;
 use crate::mmu::Access;
 use crate::trap::{Exception, cause};
@@ -37,6 +37,7 @@ impl Hart {
         let mut executed = 0;
         // Only link chain slots within one run: the caller may change pc in between.
         self.state.jit.chain_from = 0;
+        self.state.jit.fence_epoch = self.bus.code().fence_epoch();
         while executed < budget {
             if self.shared.exit_request.load(Ordering::Relaxed) != 0 {
                 self.shared.exit_request.store(0, Ordering::Relaxed);
@@ -79,15 +80,26 @@ impl Hart {
             }
         };
         // Compiled code inlines the TLB lookup without pointer masking.
-        if self.compiler.is_some()
-            && self.pm_len[crate::mmu::tlb_index(self.data_priv())] == 0
-            && let Some(code) = self.compiled_code(block)
-        {
-            let host = self.blocks.host(block);
-            let page = self.bus.ram_page_of(host);
-            self.link_chain(page, code);
-            self.fill_jump_cache(block, host, page, code);
-            return self.run_compiled(code, budget);
+        if self.compiler.is_some() && self.pm_len[crate::mmu::tlb_index(self.data_priv())] == 0 {
+            match self.compiler.as_mut().unwrap().enter() {
+                Enter::Go => {
+                    let ran = self.compiled_code(block).map(|code| {
+                        let host = self.blocks.host(block);
+                        let page = self.bus.ram_page_of(host);
+                        self.link_chain(page, code);
+                        self.fill_jump_cache(block, host, page, code);
+                        self.run_compiled(code, budget)
+                    });
+                    self.compiler.as_mut().unwrap().leave();
+                    if let Some(n) = ran {
+                        return n;
+                    }
+                }
+                // The shared code cache was emptied: forget all compiled code we know of.
+                Enter::Stale => self.flush_jit(),
+                // It is being emptied right now; interpret meanwhile.
+                Enter::Busy => {}
+            }
         }
         self.state.jit.chain_from = 0;
         let len = self.blocks.block(block).insns.len();
@@ -265,11 +277,16 @@ impl Hart {
         if slot == 0 {
             return;
         }
-        // SAFETY: chain slots live as long as the compiler that handed them out.
-        let slot = unsafe { &mut *(slot as *mut ChainSlot) };
-        if slot.page as usize == page {
-            slot.target = code;
-            slot.epoch = self.state.jit.fence_epoch;
+        let slot = slot as *mut ChainSlot;
+        // SAFETY: chain slots live as long as the code that refers to them, which this hart
+        // still references. Slots may be shared between harts, so they are written atomically
+        // (the epoch first: a reader that sees the new target with the old epoch does not chain).
+        unsafe {
+            if (*slot).page as usize == page {
+                AtomicU32::from_ptr(&raw mut (*slot).epoch)
+                    .store(self.state.jit.fence_epoch, Ordering::Relaxed);
+                AtomicU64::from_ptr(&raw mut (*slot).target).store(code, Ordering::Release);
+            }
         }
     }
 
@@ -591,7 +608,7 @@ impl Hart {
             // other harts may not have, so cached blocks are re-checked lazily against memory.
             Op::FenceI => {
                 fence(Ordering::SeqCst);
-                self.state.jit.fence_epoch = self.state.jit.fence_epoch.wrapping_add(1);
+                self.state.jit.fence_epoch = self.bus.code().new_fence_epoch();
             }
 
             Op::Csrrw | Op::Csrrs | Op::Csrrc | Op::Csrrwi | Op::Csrrsi | Op::Csrrci => {

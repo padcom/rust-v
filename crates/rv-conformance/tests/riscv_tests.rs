@@ -55,6 +55,10 @@ enum Mode {
     Jit,
     /// JIT with a code cache small enough to be flushed every few hundred blocks.
     JitTinyCache,
+    /// The shared background compiler pool, as machines use it.
+    JitPool,
+    /// The pool with a tiny cache, so that its stop-the-world resets happen constantly.
+    JitPoolTinyCache,
 }
 
 fn run_test(path: &std::path::Path, mode: Mode) -> (Outcome, String) {
@@ -82,6 +86,11 @@ fn run_elf(path: &std::path::Path, mode: Mode, max_insns: u64) -> (Outcome, Stri
         Mode::Jit => hart.compiler = Some(Box::new(rv_jit::Compiler::new().unwrap())),
         Mode::JitTinyCache => {
             hart.compiler = Some(Box::new(rv_jit::Compiler::with_cache_size(64 << 10).unwrap()))
+        }
+        Mode::JitPool | Mode::JitPoolTinyCache => {
+            let size = if mode == Mode::JitPool { rv_jit::CODE_CACHE_SIZE } else { 64 << 10 };
+            let pool = rv_jit::pool::JitPool::new(1, 2, size).unwrap();
+            hart.compiler = Some(Box::new(pool.handle(0)));
         }
     }
     hart.jit_threshold = 1;
@@ -123,6 +132,18 @@ fn riscv_tests_jit() {
 #[ignore = "needs scripts/build-riscv-tests.sh"]
 fn riscv_tests_jit_tiny_cache() {
     run_suite(Mode::JitTinyCache);
+}
+
+#[test]
+#[ignore = "needs scripts/build-riscv-tests.sh"]
+fn riscv_tests_jit_pool() {
+    run_suite(Mode::JitPool);
+}
+
+#[test]
+#[ignore = "needs scripts/build-riscv-tests.sh"]
+fn riscv_tests_jit_pool_tiny_cache() {
+    run_suite(Mode::JitPoolTinyCache);
 }
 
 fn run_suite(mode: Mode) {
