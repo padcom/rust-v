@@ -359,6 +359,7 @@ impl Compiler {
             guest,
             data_priv,
             pc0: state, // replaced below
+            page_offset: (info.host & (rv_core::mem::PAGE_SIZE - 1)) as i64,
             dirty: 0,
             flushed: 0,
             block_sig_ref,
@@ -386,8 +387,7 @@ impl Compiler {
             offset += insn.len as i64;
         }
         if !ended {
-            let next = t.b.ins().iadd_imm_s(t.pc0, offset);
-            t.chain_exit(next, insns.len() as u64, 0);
+            t.static_exit(offset, insns.len() as u64, 0);
         }
         t.b.seal_all_blocks();
         t.b.finalize(self.isa.frontend_config());
@@ -497,6 +497,8 @@ struct Translator<'a> {
     data_priv: Priv,
     /// Guest `pc` of the first instruction.
     pc0: Value,
+    /// Offset of the first instruction within its page.
+    page_offset: i64,
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
@@ -579,6 +581,23 @@ impl Translator<'_> {
     fn chain_exit(&mut self, pc: Value, retired: u64, slot: usize) {
         let slot_addr = self.b.ins().iconst(I64, self.slot_addr[slot]);
         self.chain_exit_via(pc, retired, slot_addr);
+    }
+
+    /// Leaves the block for the successor at byte `offset` from its start. Successors in the
+    /// same page are chained; the virtual-to-physical mapping of any other page may differ
+    /// between the address spaces sharing this code, so those go through the fetch TLB and
+    /// the jump cache like indirect jumps.
+    fn static_exit(&mut self, offset: i64, retired: u64, slot: usize) {
+        let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
+        if self.same_page(offset) {
+            self.chain_exit(pc, retired, slot);
+        } else {
+            self.indirect_exit(pc, retired);
+        }
+    }
+
+    fn same_page(&self, offset: i64) -> bool {
+        (0..rv_core::mem::PAGE_SIZE as i64).contains(&(self.page_offset + offset))
     }
 
     /// [`chain_exit`](Self::chain_exit) with the chain slot's address as a value, so that both
@@ -993,8 +1012,7 @@ impl Translator<'_> {
             Op::Jal => {
                 let link = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 self.set(rd, link);
-                let target = self.b.ins().iadd_imm_s(self.pc0, offset + imm);
-                self.chain_exit(target, retired, 0);
+                self.static_exit(offset + imm, retired, 0);
                 return true;
             }
             Op::Jalr => {
@@ -1018,6 +1036,15 @@ impl Translator<'_> {
                 let a = self.get(insn.rs1);
                 let b = self.get(insn.rs2);
                 let taken = self.b.ins().icmp(cc, a, b);
+                if !self.same_page(offset + imm) || !self.same_page(offset + len) {
+                    let (on_taken, on_fall) = (self.b.create_block(), self.b.create_block());
+                    self.b.ins().brif(taken, on_taken, &[], on_fall, &[]);
+                    self.b.switch_to_block(on_taken);
+                    self.static_exit(offset + imm, retired, 0);
+                    self.b.switch_to_block(on_fall);
+                    self.static_exit(offset + len, retired, 1);
+                    return true;
+                }
                 // Select the successor and its chain slot, then share one exit sequence.
                 let target = self.b.ins().iadd_imm_s(self.pc0, offset + imm);
                 let fall = self.b.ins().iadd_imm_s(self.pc0, offset + len);
