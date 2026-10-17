@@ -6,19 +6,27 @@ use std::sync::Arc;
 use clap::Parser;
 
 mod audio;
+mod config;
 mod gui;
+mod image;
 mod keymap;
 mod screenshot;
 use rv_machine::{Machine, MachineConfig, Shutdown};
 
 /// RISC-V RVA23 system emulator.
+///
+/// `rust-v --disk ubuntu.img` boots a disk image with the bundled firmware (OpenSBI and
+/// U-Boot). `--config vm.toml` reads options from a file (command-line options win).
+/// `rust-v image --help` lists the disk image tools.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, args_override_self = true)]
 struct Args {
-    /// M-mode firmware loaded at the start of RAM (e.g. OpenSBI fw_dynamic.bin).
+    /// M-mode firmware loaded at the start of RAM. Default: the bundled OpenSBI
+    /// (fw_dynamic.bin) from the firmware directory.
     #[arg(long)]
-    bios: PathBuf,
-    /// S-mode kernel image loaded at RAM + 2 MiB (e.g. a Linux Image).
+    bios: Option<PathBuf>,
+    /// S-mode payload loaded at RAM + 2 MiB (a Linux Image, or U-Boot). Default with --disk:
+    /// the bundled U-Boot, which boots the disk through its EFI boot loader.
     #[arg(long)]
     kernel: Option<PathBuf>,
     /// Initial ramdisk.
@@ -92,7 +100,7 @@ struct Args {
     dump_dtb: Option<PathBuf>,
 }
 
-fn parse_size(s: &str) -> Result<u64, String> {
+pub(crate) fn parse_size(s: &str) -> Result<u64, String> {
     let (digits, shift) = match s.char_indices().last() {
         Some((i, 'K' | 'k')) => (&s[..i], 10),
         Some((i, 'M' | 'm')) => (&s[..i], 20),
@@ -221,11 +229,28 @@ fn run_machine(machine: &mut Machine, gdb: Option<&str>) -> Result<Shutdown, Str
     }
 }
 
+/// The firmware file `name` from the firmware directories.
+fn bundled(name: &str) -> Result<PathBuf, String> {
+    config::find_firmware(name).ok_or_else(|| {
+        let dirs: Vec<String> = config::firmware_dirs().iter().map(|d| d.display().to_string()).collect();
+        format!("{name} not found (looked in {}); pass it explicitly or set RUST_V_FIRMWARE", dirs.join(", "))
+    })
+}
+
 fn run(args: Args) -> Result<Shutdown, String> {
+    let bios = match &args.bios {
+        Some(path) => path.clone(),
+        None => bundled("fw_dynamic.bin")?,
+    };
+    let kernel = match &args.kernel {
+        Some(path) => Some(path.clone()),
+        None if !args.disk.is_empty() && args.initrd.is_none() => Some(bundled("u-boot.bin")?),
+        None => None,
+    };
     let config = MachineConfig {
         ram_size: args.memory,
-        bios: read(&args.bios)?,
-        kernel: args.kernel.as_ref().map(read).transpose()?,
+        bios: read(&bios)?,
+        kernel: kernel.as_ref().map(read).transpose()?,
         initrd: args.initrd.as_ref().map(read).transpose()?,
         cmdline: args.append,
         max_satp_mode: match args.mmu.as_str() {
@@ -342,7 +367,25 @@ fn run(args: Args) -> Result<Shutdown, String> {
 }
 
 fn main() -> ExitCode {
-    match run(Args::parse()) {
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("image") {
+        return match image::main(std::iter::once("rust-v image".to_string()).chain(argv.into_iter().skip(2)))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("rust-v: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    let argv = match config::expand(argv) {
+        Ok(argv) => argv,
+        Err(e) => {
+            eprintln!("rust-v: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(Args::parse_from(argv)) {
         Ok(Shutdown::PowerOff) => ExitCode::SUCCESS,
         Ok(Shutdown::Reset) => {
             eprintln!("rust-v: guest requested reset (not supported yet), exiting");

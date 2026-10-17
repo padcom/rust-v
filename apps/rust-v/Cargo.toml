@@ -11,6 +11,7 @@ crossterm = { version = "0.29.0", default-features = false, features = ["windows
 rv-machine.workspace = true
 cpal = { version = "0.18.2", optional = true }
 softbuffer = "0.4.8"
+toml = "1.1.8"
 winit = "0.30"
 
 [features]
