@@ -99,6 +99,8 @@ pub struct MachineConfig {
     pub net: Option<rv_net::Config>,
     /// Add a virtio-gpu device showing on this display, with a virtio keyboard and tablet.
     pub display: Option<Arc<display::Display>>,
+    /// Add a virtio-snd device with one playback stream.
+    pub sound: bool,
 }
 
 /// A virtio-blk disk.
@@ -127,6 +129,7 @@ impl Default for MachineConfig {
             rng: true,
             net: None,
             display: None,
+            sound: false,
         }
     }
 }
@@ -142,6 +145,8 @@ pub struct Machine {
     pub gpu: Option<virtio::gpu::GpuHandle>,
     pub keyboard: Option<virtio::input::InputHandle>,
     pub tablet: Option<virtio::input::InputHandle>,
+    /// Where the sound device's playback goes, when there is one.
+    pub audio: Option<Arc<virtio::snd::AudioRing>>,
     pub power: Arc<power::PowerState>,
     /// The generated device tree, as handed to the firmware.
     pub dtb: Vec<u8>,
@@ -249,6 +254,12 @@ impl Machine {
             tablet = Some(handle);
             virtio_devices.push(Box::new(dev));
         }
+        let mut audio = None;
+        if config.sound {
+            let (dev, ring) = virtio::snd::Sound::new();
+            audio = Some(ring);
+            virtio_devices.push(Box::new(dev));
+        }
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
         }
@@ -326,17 +337,27 @@ impl Machine {
             })
             .collect();
         if config.jit {
+            // Background compilation uses one pool shared by all harts; synchronous
+            // compilation (for comparisons) gives each hart its own compiler.
+            let pool = if config.jit_background {
+                let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
+                let workers = num_harts.min(cores.saturating_sub(num_harts)).max(1);
+                let pool = rv_jit::pool::JitPool::new(num_harts, workers, config.jit_cache_size)
+                    .map_err(Error::Jit)?;
+                jit_stats = Some(vec![pool.stats()]);
+                Some(pool)
+            } else {
+                None
+            };
             for (id, hart) in harts.iter_mut().enumerate() {
-                let compiler: Box<dyn rv_core::jit::BlockCompiler> = if config.jit_background {
-                    let c =
-                        rv_jit::ThreadedCompiler::with_cache_size(&format!("jit{id}"), config.jit_cache_size)
-                            .map_err(Error::Jit)?;
-                    jit_stats.get_or_insert_with(Vec::new).push(c.stats());
-                    Box::new(c)
-                } else {
-                    let c = rv_jit::Compiler::with_cache_size(config.jit_cache_size).map_err(Error::Jit)?;
-                    jit_stats.get_or_insert_with(Vec::new).push(c.stats());
-                    Box::new(c)
+                let compiler: Box<dyn rv_core::jit::BlockCompiler> = match &pool {
+                    Some(pool) => Box::new(pool.handle(id)),
+                    None => {
+                        let c =
+                            rv_jit::Compiler::with_cache_size(config.jit_cache_size).map_err(Error::Jit)?;
+                        jit_stats.get_or_insert_with(Vec::new).push(c.stats());
+                        Box::new(c)
+                    }
                 };
                 hart.compiler = Some(compiler);
                 hart.jit_threshold = config.jit_threshold;
@@ -353,6 +374,7 @@ impl Machine {
             gpu,
             keyboard,
             tablet,
+            audio,
             power,
             dtb,
             stats: Stats::default(),

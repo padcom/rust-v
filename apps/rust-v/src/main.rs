@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+mod audio;
 mod gui;
 mod keymap;
 mod screenshot;
@@ -71,6 +72,9 @@ struct Args {
     /// Initial display resolution, e.g. 1920x1080.
     #[arg(long, default_value = "1280x800", value_parser = parse_resolution)]
     resolution: (u32, u32),
+    /// Do not add a sound card (one is added along with a display).
+    #[arg(long)]
+    no_sound: bool,
     /// Do not add a network card.
     #[arg(long)]
     no_net: bool,
@@ -242,6 +246,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
             .then(|| rv_machine::rv_net::Config { tcp_forwards: args.forward.clone(), ..Default::default() }),
         display: (args.display != "none")
             .then(|| rv_machine::display::Display::new(args.resolution.0, args.resolution.1)),
+        sound: args.display != "none" && !args.no_sound,
     };
     if let (Some(display), Some(path)) = (&config.display, &args.screenshot) {
         screenshot::spawn(display.clone(), path.clone(), std::time::Duration::from_secs(2));
@@ -251,6 +256,15 @@ fn run(args: Args) -> Result<Shutdown, String> {
     if let Some(path) = &args.dump_dtb {
         std::fs::write(path, &machine.dtb).map_err(|e| format!("{}: {e}", path.display()))?;
     }
+
+    // Without a host output the device still plays, into silence, at the right pace.
+    let _audio = match machine.audio.clone().map(audio::start) {
+        Some(Err(e)) => {
+            eprintln!("rust-v: no sound output: {e}");
+            None
+        }
+        other => other.and_then(Result::ok),
+    };
 
     let interactive = std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };

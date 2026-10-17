@@ -7,6 +7,7 @@ pub mod net;
 pub mod pci;
 pub mod queue;
 pub mod rng;
+pub mod snd;
 
 use std::sync::{Arc, Mutex};
 
