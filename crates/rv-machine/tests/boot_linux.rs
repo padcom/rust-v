@@ -95,10 +95,15 @@ fn rv_jit_cache_default() -> usize {
 fn boot(jit: bool, jit_cache_size: usize) {
     let console = Capture::default();
     let mut disk = vec![0u8; 4 << 20];
+    // A free host port to forward to the guest's port 8080.
+    let forward = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
     disk[..16].copy_from_slice(b"RUST-V DISK TEST");
     let config = MachineConfig {
         drives: vec![Drive { backend: Box::new(disk), read_only: false }],
-        net: Some(rv_machine::rv_net::Config::default()),
+        net: Some(rv_machine::rv_net::Config {
+            tcp_forwards: vec![(forward, 8080)],
+            ..Default::default()
+        }),
         bios: image("fw_dynamic.bin"),
         kernel: Some(image("Image")),
         initrd: Some(image("initramfs.cpio")),
@@ -165,6 +170,14 @@ fn boot(jit: bool, jit_cache_size: usize) {
     pos = console.wait_for("Address: 127.0.0.1", pos, timeout);
     uart.push_input(format!("wget -q -O - http://10.0.2.2:{port}/; echo\n").as_bytes());
     pos = console.wait_for("net-ok-from-host", pos, timeout);
+    // A host connection to the forwarded port reaches a guest listener.
+    uart.push_input(b"(echo fwd-$((5*5)) | nc -l -p 8080 >/dev/null) & sleep 1; echo nc-$((4*4))\n");
+    pos = console.wait_for("nc-16", pos, timeout);
+    let mut stream = std::net::TcpStream::connect(forward).unwrap();
+    stream.set_read_timeout(Some(timeout)).unwrap();
+    let mut reply = String::new();
+    std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
+    assert_eq!(reply, "fwd-25\n");
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 

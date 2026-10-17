@@ -38,6 +38,36 @@ Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful option
 | `--stats` | print instruction count and MIPS on exit |
 | `--dump-dtb file.dtb` | save the generated device tree |
 
+## Running Ubuntu Server
+
+The official Ubuntu RISC-V preinstalled server image boots through OpenSBI, U-Boot and GRUB:
+
+```sh
+scripts/build-guest-images.sh   # OpenSBI (and the bring-up kernel)
+scripts/build-uboot.sh          # third_party/guest/u-boot.bin
+scripts/fetch-ubuntu.sh         # downloads and checks the image, grows it to 16 GiB
+
+G=third_party/guest
+target/release/rust-v --bios $G/fw_dynamic.bin --kernel $G/u-boot.bin -m 4G \
+  --disk third_party/ubuntu/ubuntu-26.10-server-riscv64.img --forward 2222:22
+```
+
+Log in as `ubuntu` / `ubuntu` (you are asked to choose a new password). The guest gets a
+network through user-mode NAT; `--forward` exposes guest ports on the host's loopback.
+`scripts/ubuntu-smoke.py` boots the image with writes kept in memory, logs in, runs
+`apt-get update` and reports how long each step took.
+
+Devices and networking options:
+
+| Option | Meaning |
+|---|---|
+| `--disk PATH[,ro][,snapshot]` | raw image as a virtio-blk disk; `snapshot` keeps writes in memory |
+| `--forward [ADDR:]PORT:GUEST_PORT` | forward a host TCP port into the guest (repeatable) |
+| `--no-net` | no network card |
+
+The virtual network matches QEMU's: the guest is 10.0.2.15, the gateway 10.0.2.2 (which
+reaches the host's loopback interface) and the DNS server 10.0.2.3.
+
 ## Testing
 
 ```sh
@@ -64,6 +94,7 @@ cargo test --release -p rv-conformance -- --ignored vector_tests
 | `rv-core` | hart state, CSRs, traps, MMU, FPU, vector unit, decoded-block cache, interpreter |
 | `rv-elf` | minimal ELF loader |
 | `rv-jit` | Cranelift-based block compiler |
+| `rv-net` | user-mode networking: DHCP, DNS, UDP NAT, TCP through smoltcp |
 | `rv-conformance` | riscv-tests runner for interpreter and JIT |
-| `rv-machine` | the board: CLINT, PLIC, UART, RTC, power control, device tree, GDB stub |
+| `rv-machine` | the board: CLINT, PLIC, UART, RTC, power control, PCIe, virtio devices, device tree, GDB stub |
 | `rust-v` | command-line front end |

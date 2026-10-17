@@ -15,7 +15,8 @@ is fast enough to use GNOME and a web browser.
 | 3: Full RVA23 ISA | ✅ F/D/Zfa/Zfhmin on a TestFloat-verified softfloat (busybox/glibc userland runs); Zba/Zbb/Zbs/Zicond/Zcb/Zimop/Zcmop/Zawrs/Zicbo*/Svinval; Sstc, Svpbmt, Svnapot, Smstateen/Ssstateen, Smnpm/Ssnpm, Sscofpmf; RVV 1.0 + Zvfh/Zvfhmin/Zvbb (2993/2993 Spike-checked riscv-vector-tests). H deferred to Phase 10 |
 | 4: SMP | ✅ 4 harts on host threads (or round-robin with `--single-thread`); OpenSBI HSM bring-up, IPIs, remote fences; atomics/LR-SC/message-passing litmus and cross-modifying-code tests; Linux reports 4 CPUs and scales 3.9× on a parallel workload |
 | 5: Full JIT | ✅ on by default: tail-call block chaining, inline indirect-jump cache, background compilation per hart, own code cache (MAP_JIT on Apple Silicon) with flush-on-full, interpreter helper for FP/atomics/vector. CoreMark ~6400 it/s (2.1 GIPS, ~10× interpreter); Linux to init in 1.1 s on 4 harts. Lockstep interp-vs-JIT mode replaced by running every conformance suite in both modes (and with a tiny code cache) |
-| 6: Virtio + Ubuntu Server | next |
+| 6: Virtio + Ubuntu Server | ✅ PCIe host bridge (ECAM, INTx on the PLIC), modern virtio-pci, virtio-blk (raw images, `,snapshot` copy-on-write), virtio-net on user-mode networking (DHCP, DNS through the host resolver, UDP NAT, TCP via smoltcp, host port forwarding), virtio-rng. OpenSBI → U-Boot → GRUB → the official Ubuntu 26.10 RISC-V server image: first boot (cloud-init) to the login prompt in ~55 s, `apt-get update` works. Along the way: privileged block terminators compiled, a block cache big enough for a distribution, page-at-a-time vector memory access. Deferred: virtio-console (Phase 7, with the other desktop devices), AIA/MSI-X, qcow2, an I/O thread for disks |
+| 7: Desktop I/O + Ubuntu Desktop | next |
 
 ---
 
