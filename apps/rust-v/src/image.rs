@@ -118,7 +118,7 @@ fn info(path: &PathBuf) -> Result<(), String> {
                 continue;
             }
             let name: String =
-                char::decode_utf16(e[56..128].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])))
+                char::decode_utf16(e[56..128].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)))
                     .map(|c| c.unwrap_or('?'))
                     .take_while(|&c| c != '\0')
                     .collect();
