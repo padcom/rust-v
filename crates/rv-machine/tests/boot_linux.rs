@@ -191,10 +191,19 @@ fn boot(jit: bool, jit_cache_size: usize) {
     // A host connection to the forwarded port reaches a guest listener.
     uart.push_input(b"(echo fwd-$((5*5)) | nc -l -p 8080 >/dev/null) & sleep 1; echo nc-$((4*4))\n");
     pos = console.wait_for("nc-16", pos, timeout);
-    let mut stream = std::net::TcpStream::connect(forward).unwrap();
-    stream.set_read_timeout(Some(timeout)).unwrap();
-    let mut reply = String::new();
-    std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
+    // Until nc listens (it may take longer than the second on a slow host), the guest resets
+    // the connection and the reply is empty: try again.
+    let deadline = std::time::Instant::now() + timeout;
+    let reply = loop {
+        let mut stream = std::net::TcpStream::connect(forward).unwrap();
+        stream.set_read_timeout(Some(timeout)).unwrap();
+        let mut reply = String::new();
+        let _ = std::io::Read::read_to_string(&mut stream, &mut reply);
+        if !reply.is_empty() || std::time::Instant::now() > deadline {
+            break reply;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
     assert_eq!(reply, "fwd-25\n");
     // virtio-9p: read a host file, write one back.
     uart.push_input(

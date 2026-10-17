@@ -139,7 +139,7 @@ unsafe extern "C" fn write_fence(cookie: *mut c_void, fence: u32) {
 #[cfg(target_os = "macos")]
 mod cgl {
     use super::GlContextParams;
-    use std::ffi::{c_int, c_void};
+    use std::ffi::{c_char, c_int, c_void};
 
     const PFA_ACCELERATED: c_int = 73;
     const PFA_ALLOW_OFFLINE_RENDERERS: c_int = 96;
@@ -201,6 +201,114 @@ mod cgl {
         // SAFETY: `ctx` came from `create` (or is null).
         if unsafe { CGLSetCurrentContext(ctx) } == 0 { 0 } else { -1 }
     }
+
+    type ShaderSource = unsafe extern "C" fn(u32, c_int, *const *const c_char, *const c_int);
+    static REAL_SHADER_SOURCE: std::sync::OnceLock<ShaderSource> = std::sync::OnceLock::new();
+
+    /// virglrenderer writes GLSL for drivers that accept old `#version`s in a core profile
+    /// and list core features as extensions; Apple's does neither. libepoxy, through which
+    /// virglrenderer calls OpenGL, keeps each function in an exported pointer: this points
+    /// glShaderSource at [`shader_source`], which passes the source through [`super::fix_glsl`].
+    pub fn install_shader_shim() -> Result<(), String> {
+        let gl = "/System/Library/Frameworks/OpenGL.framework/Versions/Current/OpenGL";
+        // SAFETY: loading system and Homebrew libraries without initialisation requirements;
+        // the symbols have the types declared (the epoxy one is a pointer variable).
+        unsafe {
+            let gl = libloading::Library::new(gl).map_err(|e| e.to_string())?;
+            let real: ShaderSource = *gl.get(b"glShaderSource\0").map_err(|e| e.to_string())?;
+            let _ = REAL_SHADER_SOURCE.set(real);
+            std::mem::forget(gl);
+            let mut errors = Vec::new();
+            for name in [
+                "/opt/homebrew/opt/libepoxy/lib/libepoxy.0.dylib",
+                "/usr/local/opt/libepoxy/lib/libepoxy.0.dylib",
+                "libepoxy.0.dylib",
+            ] {
+                match libloading::Library::new(name) {
+                    Ok(epoxy) => {
+                        let slot: libloading::Symbol<*mut ShaderSource> =
+                            epoxy.get(b"epoxy_glShaderSource\0").map_err(|e| e.to_string())?;
+                        **slot = shader_source;
+                        std::mem::forget(epoxy);
+                        return Ok(());
+                    }
+                    Err(e) => errors.push(e.to_string()),
+                }
+            }
+            Err(format!("libepoxy was not found ({})", errors.join("; ")))
+        }
+    }
+
+    unsafe extern "C" fn shader_source(
+        shader: u32,
+        count: c_int,
+        strings: *const *const c_char,
+        lengths: *const c_int,
+    ) {
+        let mut source = Vec::new();
+        for i in 0..count.max(0) as usize {
+            // SAFETY: OpenGL's contract: `count` strings, NUL-terminated unless a length is given.
+            unsafe {
+                let s = *strings.add(i);
+                let len = if lengths.is_null() || *lengths.add(i) < 0 {
+                    std::ffi::CStr::from_ptr(s).to_bytes().len()
+                } else {
+                    *lengths.add(i) as usize
+                };
+                source.extend_from_slice(std::slice::from_raw_parts(s.cast::<u8>(), len));
+            }
+        }
+        let fixed = super::fix_glsl(&String::from_utf8_lossy(&source));
+        let fixed = std::ffi::CString::new(fixed).unwrap_or_default();
+        let real = REAL_SHADER_SOURCE.get().expect("shim installed without the real function");
+        // SAFETY: one NUL-terminated string.
+        unsafe { real(shader, 1, &fixed.as_ptr(), std::ptr::null()) };
+    }
+}
+
+/// Extensions whose functionality is core in GLSL 4.10, which Apple's OpenGL does not list.
+const CORE_IN_410: &[&str] = &[
+    "GL_ARB_fragment_coord_conventions",
+    "GL_ARB_explicit_attrib_location",
+    "GL_ARB_uniform_buffer_object",
+    "GL_ARB_separate_shader_objects",
+    "GL_ARB_shader_bit_encoding",
+    "GL_ARB_gpu_shader5",
+    "GL_ARB_gpu_shader_fp64",
+    "GL_ARB_sample_shading",
+    "GL_ARB_texture_cube_map_array",
+    "GL_ARB_texture_gather",
+    "GL_ARB_texture_query_lod",
+    "GL_ARB_texture_multisample",
+    "GL_ARB_texture_rectangle",
+    "GL_ARB_draw_instanced",
+    "GL_ARB_tessellation_shader",
+    "GL_ARB_viewport_array",
+    "GL_ARB_shading_language_420pack_lite",
+];
+
+/// Makes desktop GLSL from virglrenderer acceptable to a 4.1 core profile: `#version 410`, and
+/// no `#extension` lines for what 4.10 has built in. GLSL ES is left alone.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn fix_glsl(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 16);
+    for line in source.split_inclusive('\n') {
+        let t = line.trim_start();
+        if let Some(v) = t.strip_prefix("#version") {
+            if !v.trim_end().ends_with("es") && v.trim().parse::<u32>().is_ok_and(|v| v < 410) {
+                out.push_str("#version 410\n");
+                continue;
+            }
+        } else if let Some(e) = t.strip_prefix("#extension") {
+            let name = e.split(':').next().unwrap_or("").trim();
+            if CORE_IN_410.contains(&name) {
+                out.push('\n'); // keeps the line numbers in compiler messages
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 unsafe extern "C" {
@@ -413,11 +521,15 @@ struct Renderer {
     readback: Vec<u8>,
     /// SUBMIT_3D commands seen (for RV_GPU_TRACE).
     submits: u64,
+    /// Scanout resource whose read-back failed (reported once).
+    unreadable: Option<u32>,
 }
 
 impl Renderer {
     fn start(display: Arc<Display>) -> Result<Self, String> {
         let api = Api::load()?;
+        #[cfg(target_os = "macos")]
+        cgl::install_shader_shim().map_err(|e| format!("OpenGL shader shim: {e}"))?;
         let cookie = Box::new(Cookie::default());
         let callbacks = Box::leak(Box::new(Callbacks {
             version: 1,
@@ -469,6 +581,7 @@ impl Renderer {
             request: Vec::new(),
             readback: Vec::new(),
             submits: 0,
+            unreadable: None,
         })
     }
 
@@ -839,6 +952,12 @@ impl Renderer {
                 {
                     return (cmd::ERR_INVALID_PARAMETER, vec![]);
                 }
+                if trace() {
+                    eprintln!(
+                        "virtio-gpu: scanout {id}: {}x{} format {} flags {:#x}, showing {}x{}+{}+{}\r",
+                        info.width, info.height, info.virgl_format, info.flags, r.width, r.height, r.x, r.y
+                    );
+                }
                 self.scanout = Some((id, r, format));
                 self.present(r);
                 (cmd::OK_NODATA, vec![])
@@ -891,7 +1010,12 @@ impl Renderer {
         let mut iov = Iovec { base: self.readback.as_mut_ptr().cast(), len: self.readback.len() };
         let mut b = VirglBox { x: x0, y: y0, z: 0, w, h, d: 1 };
         // SAFETY: the buffer holds `w * h` pixels at a stride of `4 * w`.
-        if unsafe { (self.api.transfer_read_iov)(id, 0, 0, 4 * w, 0, &mut b, 0, &mut iov, 1) } != 0 {
+        let r = unsafe { (self.api.transfer_read_iov)(id, 0, 0, 4 * w, 0, &mut b, 0, &mut iov, 1) };
+        if r != 0 {
+            if self.unreadable != Some(id) {
+                eprintln!("virtio-gpu: cannot read back scanout resource {id} (error {r})\r");
+                self.unreadable = Some(id);
+            }
             return;
         }
         let pixels = &self.readback;
@@ -952,4 +1076,21 @@ impl Renderer {
 fn request_bytes(words: &mut [u64]) -> &mut [u8] {
     // SAFETY: any bytes are valid u64s and vice versa.
     unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast(), words.len() * 8) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fix_glsl;
+
+    #[test]
+    fn glsl_for_core_410() {
+        let src = "#version 130\n#extension GL_ARB_fragment_coord_conventions : require\n\
+                   #extension GL_EXT_texture_array : require\nlayout(origin_upper_left) in vec4 gl_FragCoord;\n";
+        assert_eq!(
+            fix_glsl(src),
+            "#version 410\n\n#extension GL_EXT_texture_array : require\nlayout(origin_upper_left) in vec4 gl_FragCoord;\n"
+        );
+        assert_eq!(fix_glsl("#version 430\nvoid main(){}"), "#version 430\nvoid main(){}");
+        assert_eq!(fix_glsl("#version 300 es\n"), "#version 300 es\n");
+    }
 }
