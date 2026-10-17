@@ -172,19 +172,23 @@ impl Translator<'_> {
         let f3 = (raw >> 12) & 7;
         let funct6 = raw >> 26;
         let vm = (raw >> 25) & 1 == 1;
+        let masked = !vm;
         let (vd, vs2, rs1) = (insn.rd, insn.rs2, insn.rs1);
         let simm = ((rs1 as i8) << 3 >> 3) as i64;
-        if !vm {
-            return false;
-        }
         match f3 {
             // OPIVV, OPIVX, OPIVI
             0 | 3 | 4 => {
                 let operand = match f3 {
                     0 => Operand::V(rs1),
                     4 => Operand::X(rs1),
-                    // Shifts take the immediate unsigned.
-                    _ if matches!(funct6, 0b100101 | 0b101000 | 0b101001) => Operand::Imm(rs1 as i64),
+                    // Shifts, slides and gathers take the immediate unsigned.
+                    _ if matches!(
+                        funct6,
+                        0b100101 | 0b101000 | 0b101001 | 0b001100 | 0b001110 | 0b001111
+                    ) =>
+                    {
+                        Operand::Imm(rs1 as i64)
+                    }
                     _ => Operand::Imm(simm),
                 };
                 let arith = match funct6 {
@@ -198,44 +202,60 @@ impl Translator<'_> {
                     0b000101 if f3 != 3 => Arith::Min,
                     0b000110 if f3 != 3 => Arith::MaxU,
                     0b000111 if f3 != 3 => Arith::Max,
-                    // Shifts by a scalar amount; per-lane amounts are not supported natively.
-                    0b100101 if f3 != 0 => Arith::Sll,
-                    0b101000 if f3 != 0 => Arith::Srl,
-                    0b101001 if f3 != 0 => Arith::Sra,
+                    0b100101 => Arith::Sll,
+                    0b101000 => Arith::Srl,
+                    0b101001 => Arith::Sra,
                     // vmv.v.* is vmerge with vm=1 and vs2=0.
-                    0b010111 if vs2 == 0 => Arith::Move,
-                    0b011000..=0b011111 => return self.vector_compare(cfg, funct6, vd, vs2, operand, f3),
+                    0b010111 if vm && vs2 == 0 => Arith::Move,
+                    0b010111 if masked => return self.vmerge(cfg, vd, vs2, operand),
+                    0b011000..=0b011111 => {
+                        return self.vector_compare(cfg, funct6, vd, vs2, operand, f3, masked);
+                    }
+                    0b001111 if f3 == 3 && vm => return self.vslide(cfg, vd, vs2, rs1 as u32, false),
+                    0b001110 if f3 == 3 && vm => return self.vslide(cfg, vd, vs2, rs1 as u32, true),
+                    0b001100 if f3 == 3 && vm => return self.vrgather_vi(cfg, vd, vs2, rs1 as u32),
                     _ => return false,
                 };
-                self.vector_arith(cfg, arith, vd, vs2, operand)
+                self.vector_arith(cfg, arith, vd, vs2, operand, masked)
             }
             // OPMVV
             2 => match funct6 {
-                0b100101 => self.vector_arith(cfg, Arith::Mul, vd, vs2, Operand::V(rs1)),
+                0b100101 => self.vector_arith(cfg, Arith::Mul, vd, vs2, Operand::V(rs1), masked),
+                0b000000..=0b000111 if vm => self.vreduce(cfg, funct6, vd, vs2, rs1),
                 // VWXUNARY0: vmv.x.s, vcpop.m, vfirst.m
-                0b010000 => match rs1 {
+                0b010000 if vm => match rs1 {
                     0b00000 => self.vmv_x_s(cfg, vd, vs2),
                     0b10000 | 0b10001 => self.vmask_count(vd, vs2, rs1 == 0b10001),
                     _ => false,
                 },
                 // VMUNARY0: vid.v
-                0b010100 if rs1 == 0b10001 && vs2 == 0 => self.vid(cfg, vd),
-                // Mask logical operations.
-                0b011000..=0b011111 => self.vmask_logic(funct6, vd, vs2, rs1),
+                0b010100 if vm && rs1 == 0b10001 && vs2 == 0 => self.vid(cfg, vd),
+                // Mask logical operations (always unmasked).
+                0b011000..=0b011111 if vm => self.vmask_logic(funct6, vd, vs2, rs1),
                 _ => false,
             },
             // OPMVX
             6 => match funct6 {
-                0b100101 => self.vector_arith(cfg, Arith::Mul, vd, vs2, Operand::X(rs1)),
+                0b100101 => self.vector_arith(cfg, Arith::Mul, vd, vs2, Operand::X(rs1), masked),
                 // VRXUNARY0: vmv.s.x
-                0b010000 if vs2 == 0 => self.vmv_s_x(cfg, vd, rs1),
+                0b010000 if vm && vs2 == 0 => self.vmv_s_x(cfg, vd, rs1),
+                0b001111 if vm => self.vslide1(cfg, vd, vs2, rs1, false),
+                0b001110 if vm => self.vslide1(cfg, vd, vs2, rs1, true),
                 _ => false,
             },
             _ => false,
         }
     }
 
-    fn vector_arith(&mut self, cfg: Vconfig, arith: Arith, vd: u8, vs2: u8, operand: Operand) -> bool {
+    fn vector_arith(
+        &mut self,
+        cfg: Vconfig,
+        arith: Arith,
+        vd: u8,
+        vs2: u8,
+        operand: Operand,
+        masked: bool,
+    ) -> bool {
         let regs = cfg.regs();
         let aligned = Self::aligned(vd, regs)
             && Self::aligned(vs2, regs)
@@ -243,13 +263,13 @@ impl Translator<'_> {
                 Operand::V(r) => Self::aligned(r, regs),
                 _ => true,
             };
-        if !aligned || (cfg.sew == 8 && arith == Arith::Mul && !self.supports_i64x2_mul()) {
+        // A masked destination must not be the mask.
+        if !aligned || (masked && vd == 0) {
             return false;
         }
         let vl = self.load_vl();
         let scalar = match operand {
             Operand::V(_) => None,
-            // Shift amounts are taken modulo SEW by Cranelift as by RVV.
             _ => Some(self.splat_operand(cfg, operand)),
         };
         let amount = match (arith, operand) {
@@ -263,34 +283,302 @@ impl Translator<'_> {
                 Operand::V(reg) => self.load_vreg(cfg, reg as u32 + r),
                 _ => scalar.unwrap(),
             };
-            let ins = self.b.ins();
-            let result = match arith {
-                Arith::Add => ins.iadd(a, b),
-                Arith::Sub => ins.isub(a, b),
-                Arith::Rsub => ins.isub(b, a),
-                Arith::And => ins.band(a, b),
-                Arith::Or => ins.bor(a, b),
-                Arith::Xor => ins.bxor(a, b),
-                Arith::MinU => ins.umin(a, b),
-                Arith::Min => ins.smin(a, b),
-                Arith::MaxU => ins.umax(a, b),
-                Arith::Max => ins.smax(a, b),
-                Arith::Sll => ins.ishl(a, amount.unwrap()),
-                Arith::Srl => ins.ushr(a, amount.unwrap()),
-                Arith::Sra => ins.sshr(a, amount.unwrap()),
-                Arith::Mul => ins.imul(a, b),
-                Arith::Move => b,
+            let result = match (arith, amount) {
+                // Per-lane shift amounts: Cranelift shifts take one amount, so go lane by lane.
+                (Arith::Sll | Arith::Srl | Arith::Sra, None) => self.per_lane_shift(cfg, arith, a, b),
+                _ => {
+                    let ins = self.b.ins();
+                    match arith {
+                        Arith::Add => ins.iadd(a, b),
+                        Arith::Sub => ins.isub(a, b),
+                        Arith::Rsub => ins.isub(b, a),
+                        Arith::And => ins.band(a, b),
+                        Arith::Or => ins.bor(a, b),
+                        Arith::Xor => ins.bxor(a, b),
+                        Arith::MinU => ins.umin(a, b),
+                        Arith::Min => ins.smin(a, b),
+                        Arith::MaxU => ins.umax(a, b),
+                        Arith::Max => ins.smax(a, b),
+                        // Shift amounts are taken modulo SEW by Cranelift as by RVV.
+                        Arith::Sll => ins.ishl(a, amount.unwrap()),
+                        Arith::Srl => ins.ushr(a, amount.unwrap()),
+                        Arith::Sra => ins.sshr(a, amount.unwrap()),
+                        Arith::Mul => ins.imul(a, b),
+                        Arith::Move => b,
+                    }
+                }
             };
             let old = self.load_vreg(cfg, vd as u32 + r);
-            let body = self.body_mask(cfg, r, vl);
-            let out = self.b.ins().bitselect(body, result, old);
+            let mut write = self.body_mask(cfg, r, vl);
+            if masked {
+                let active = self.active_lanes(cfg, r);
+                write = self.b.ins().band(write, active);
+            }
+            let out = self.b.ins().bitselect(write, result, old);
             self.store_vreg(out, vd as u32 + r);
         }
         true
     }
 
-    fn supports_i64x2_mul(&self) -> bool {
-        // Cranelift lowers i64x2 multiplication on every backend we target.
+    fn per_lane_shift(&mut self, cfg: Vconfig, arith: Arith, a: Value, amounts: Value) -> Value {
+        let mut out = a;
+        for l in 0..cfg.lanes() as u8 {
+            let x = self.b.ins().extractlane(a, l);
+            let n = self.b.ins().extractlane(amounts, l);
+            // Scalar shifts also take the amount modulo the width.
+            let y = match arith {
+                Arith::Sll => self.b.ins().ishl(x, n),
+                Arith::Srl => self.b.ins().ushr(x, n),
+                _ => self.b.ins().sshr(x, n),
+            };
+            out = self.b.ins().insertlane(out, y, l);
+        }
+        out
+    }
+
+    /// Lanes of register `r` of a group whose bit in the mask register v0 is set.
+    fn active_lanes(&mut self, cfg: Vconfig, r: u32) -> Value {
+        let lanes = cfg.lanes();
+        let first = r * lanes;
+        let word = Self::v_offset(0) + (first / 64 * 8) as i32;
+        let bits = self.b.ins().load(I64, self.trusted, self.state, word);
+        let bits = self.b.ins().ushr_imm_s(bits, (first % 64) as i64);
+        if cfg.sew == 1 {
+            // 16 lanes from 16 bits: lanes 0-7 test bits of the low byte, 8-15 of the high one.
+            let half = self.b.ins().ireduce(I16, bits);
+            let splat = self.b.ins().splat(I16X8, half);
+            let le = MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+            let bytes = self.b.ins().bitcast(I8X16, le, splat);
+            let pick: Vec<u8> = (0..16).map(|i| (i / 8) as u8).collect();
+            let pick = self.b.func.dfg.immediates.push(ConstantData::from(pick));
+            let spread = self.b.ins().shuffle(bytes, bytes, pick);
+            let tests = self.vconst(I8X16, (0..16).map(|i| 1u8 << (i % 8)).collect());
+            let set = self.b.ins().band(spread, tests);
+            let zero = self.vconst(I8X16, vec![0; 16]);
+            return self.b.ins().icmp(IntCC::NotEqual, set, zero);
+        }
+        let ty = cfg.lane_type();
+        let narrow = if ty == I64 { bits } else { self.b.ins().ireduce(ty, bits) };
+        let splat = self.b.ins().splat(cfg.vector_type(), narrow);
+        let mut tests = Vec::with_capacity(16);
+        for i in 0..lanes {
+            tests.extend_from_slice(&(1u64 << i).to_le_bytes()[..cfg.sew as usize]);
+        }
+        let tests = self.vconst(cfg.vector_type(), tests);
+        let set = self.b.ins().band(splat, tests);
+        let zero = self.vconst(cfg.vector_type(), vec![0; 16]);
+        self.b.ins().icmp(IntCC::NotEqual, set, zero)
+    }
+
+    /// vmerge.vvm/vxm/vim: vd[i] = v0[i] ? operand : vs2[i], for every i below vl.
+    fn vmerge(&mut self, cfg: Vconfig, vd: u8, vs2: u8, operand: Operand) -> bool {
+        let regs = cfg.regs();
+        let aligned = Self::aligned(vd, regs)
+            && Self::aligned(vs2, regs)
+            && match operand {
+                Operand::V(r) => Self::aligned(r, regs),
+                _ => true,
+            };
+        if !aligned || vd == 0 {
+            return false;
+        }
+        let vl = self.load_vl();
+        let scalar = match operand {
+            Operand::V(_) => None,
+            _ => Some(self.splat_operand(cfg, operand)),
+        };
+        for r in 0..regs {
+            let a = self.load_vreg(cfg, vs2 as u32 + r);
+            let b = match operand {
+                Operand::V(reg) => self.load_vreg(cfg, reg as u32 + r),
+                _ => scalar.unwrap(),
+            };
+            let active = self.active_lanes(cfg, r);
+            let merged = self.b.ins().bitselect(active, b, a);
+            let old = self.load_vreg(cfg, vd as u32 + r);
+            let body = self.body_mask(cfg, r, vl);
+            let out = self.b.ins().bitselect(body, merged, old);
+            self.store_vreg(out, vd as u32 + r);
+        }
+        true
+    }
+
+    /// Per-byte lane numbers of one register, and the bytes of lanes below `vl`.
+    fn byte_lanes(&mut self, cfg: Vconfig, vl: Value) -> (Value, Value) {
+        let index = self.vconst(I8X16, (0..16).map(|j| (j / cfg.sew) as u8).collect());
+        let narrow = self.b.ins().ireduce(I8, vl);
+        let limit = self.b.ins().splat(I8X16, narrow);
+        let body = self.b.ins().icmp(IntCC::UnsignedLessThan, index, limit);
+        (index, body)
+    }
+
+    fn load_bytes(&mut self, reg: u32) -> Value {
+        self.b.ins().load(I8X16, self.trusted, self.state, Self::v_offset(reg))
+    }
+
+    /// A byte shuffle of `a` (indices 0-15) and `b` (16-31) choosing, for each lane of the
+    /// result, the lane `pick(lane)` of `a`, or `Err(lane)` of `b`.
+    fn shuffle_lanes(
+        &mut self,
+        cfg: Vconfig,
+        a: Value,
+        b: Value,
+        pick: impl Fn(u32) -> Result<u32, u32>,
+    ) -> Value {
+        let sew = cfg.sew;
+        let mask: Vec<u8> = (0..16)
+            .map(|j| {
+                let (lane, byte) = (j / sew, j % sew);
+                match pick(lane) {
+                    Ok(src) => (src * sew + byte) as u8,
+                    Err(src) => (16 + src * sew + byte) as u8,
+                }
+            })
+            .collect();
+        let mask = self.b.func.dfg.immediates.push(ConstantData::from(mask));
+        self.b.ins().shuffle(a, b, mask)
+    }
+
+    /// vslidedown.vi / vslideup.vi within a single register.
+    fn vslide(&mut self, cfg: Vconfig, vd: u8, vs2: u8, by: u32, up: bool) -> bool {
+        if cfg.regs() != 1 || (up && vd == vs2) {
+            return false;
+        }
+        let vl = self.load_vl();
+        let vlmax = cfg.vlmax();
+        let src = self.load_bytes(vs2 as u32);
+        let old = self.load_bytes(vd as u32);
+        let zero = self.vconst(I8X16, vec![0; 16]);
+        let result = if up {
+            // Lanes below the offset keep their value.
+            self.shuffle_lanes(cfg, src, old, |i| if i >= by { Ok(i - by) } else { Err(i) })
+        } else {
+            // Lanes reading past VLMAX get zero.
+            self.shuffle_lanes(cfg, src, zero, |i| if i + by < vlmax { Ok(i + by) } else { Err(0) })
+        };
+        let (_, body) = self.byte_lanes(cfg, vl);
+        let out = self.b.ins().bitselect(body, result, old);
+        self.store_bytes(out, vd as u32);
+        true
+    }
+
+    /// Copies the first `len` bytes of the register file from register `reg` on to guest
+    /// memory at `host`, then continues at `done`.
+    fn store_bytes_loop(&mut self, reg: u32, host: Value, len: Value, done: cranelift_codegen::ir::Block) {
+        let guest = MemFlagsData::new().with_notrap();
+        let t = self.trusted;
+        let (head, body) = (self.b.create_block(), self.b.create_block());
+        let i = self.b.append_block_param(head, I64);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().jump(head, &[zero.into()]);
+        self.b.switch_to_block(head);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.b.ins().brif(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let src = self.b.ins().iadd(self.state, i);
+        let byte = self.b.ins().uload8(I64, t, src, Self::v_offset(reg));
+        let dst = self.b.ins().iadd(host, i);
+        self.b.ins().istore8(guest, byte, dst, 0);
+        let next = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(head, &[next.into()]);
+    }
+
+    fn store_bytes(&mut self, value: Value, reg: u32) {
+        self.b.ins().store(self.trusted, value, self.state, Self::v_offset(reg));
+    }
+
+    /// vslide1down.vx / vslide1up.vx within a single register.
+    fn vslide1(&mut self, cfg: Vconfig, vd: u8, vs2: u8, rs1: u8, up: bool) -> bool {
+        if cfg.regs() != 1 || (up && vd == vs2) {
+            return false;
+        }
+        let vl = self.load_vl();
+        let src = self.load_bytes(vs2 as u32);
+        let old = self.load_bytes(vd as u32);
+        let zero = self.vconst(I8X16, vec![0; 16]);
+        let lanes = cfg.lanes();
+        let shifted = if up {
+            self.shuffle_lanes(cfg, src, zero, |i| if i >= 1 { Ok(i - 1) } else { Err(0) })
+        } else {
+            self.shuffle_lanes(cfg, src, zero, |i| if i + 1 < lanes { Ok(i + 1) } else { Err(0) })
+        };
+        // The scalar goes to lane 0 (up) or lane vl - 1 (down).
+        let x = self.get(rs1);
+        let ty = cfg.lane_type();
+        let narrow = if ty == I64 { x } else { self.b.ins().ireduce(ty, x) };
+        let splat = self.b.ins().splat(cfg.vector_type(), narrow);
+        let le = MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+        let scalar_bytes = self.b.ins().bitcast(I8X16, le, splat);
+        let (index, body) = self.byte_lanes(cfg, vl);
+        let at = if up {
+            self.b.ins().iconst(I8, 0)
+        } else {
+            let last = self.b.ins().iadd_imm_s(vl, -1);
+            self.b.ins().ireduce(I8, last)
+        };
+        let at = self.b.ins().splat(I8X16, at);
+        let is_at = self.b.ins().icmp(IntCC::Equal, index, at);
+        let result = self.b.ins().bitselect(is_at, scalar_bytes, shifted);
+        let out = self.b.ins().bitselect(body, result, old);
+        self.store_bytes(out, vd as u32);
+        true
+    }
+
+    /// vrgather.vi within a single register: every lane below vl gets lane `index` of vs2
+    /// (or zero past VLMAX).
+    fn vrgather_vi(&mut self, cfg: Vconfig, vd: u8, vs2: u8, index: u32) -> bool {
+        if cfg.regs() != 1 || vd == vs2 {
+            return false;
+        }
+        let vl = self.load_vl();
+        let vlmax = cfg.vlmax();
+        let src = self.load_bytes(vs2 as u32);
+        let old = self.load_bytes(vd as u32);
+        let zero = self.vconst(I8X16, vec![0; 16]);
+        let result = self.shuffle_lanes(cfg, src, zero, |_| if index < vlmax { Ok(index) } else { Err(0) });
+        let (_, body) = self.byte_lanes(cfg, vl);
+        let out = self.b.ins().bitselect(body, result, old);
+        self.store_bytes(out, vd as u32);
+        true
+    }
+
+    /// Integer reductions (vredsum, vredand, vredor, vredxor, vredminu, vredmin, vredmaxu,
+    /// vredmax), unmasked, over groups of up to two registers: vd[0] = op(vs1[0], vs2[i < vl]).
+    fn vreduce(&mut self, cfg: Vconfig, funct6: u32, vd: u8, vs2: u8, vs1: u8) -> bool {
+        let regs = cfg.regs();
+        if regs > 2 || !Self::aligned(vs2, regs) {
+            return false;
+        }
+        let ty = cfg.lane_type();
+        let t = self.trusted;
+        let vl = self.load_vl();
+        let mut acc = self.b.ins().load(ty, t, self.state, Self::v_offset(vs1 as u32));
+        let lanes = cfg.lanes().min(cfg.vlmax());
+        for r in 0..regs {
+            let v = self.load_vreg(cfg, vs2 as u32 + r);
+            for l in 0..lanes {
+                let x = self.b.ins().extractlane(v, l as u8);
+                let ins = self.b.ins();
+                let next = match funct6 {
+                    0b000000 => ins.iadd(acc, x),
+                    0b000001 => ins.band(acc, x),
+                    0b000010 => ins.bor(acc, x),
+                    0b000011 => ins.bxor(acc, x),
+                    0b000100 => ins.umin(acc, x),
+                    0b000101 => ins.smin(acc, x),
+                    0b000110 => ins.umax(acc, x),
+                    _ => ins.smax(acc, x),
+                };
+                let below =
+                    self.b.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, vl, (r * cfg.lanes() + l) as i64);
+                acc = self.b.ins().select(below, next, acc);
+            }
+        }
+        // Nothing is written when vl is 0.
+        let old = self.b.ins().load(ty, t, self.state, Self::v_offset(vd as u32));
+        let any = self.b.ins().icmp_imm_s(IntCC::NotEqual, vl, 0);
+        let v = self.b.ins().select(any, acc, old);
+        self.b.ins().store(t, v, self.state, Self::v_offset(vd as u32));
         true
     }
 
@@ -334,6 +622,7 @@ impl Translator<'_> {
         self.b.ins().store(self.trusted, hi, self.state, at + 8);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn vector_compare(
         &mut self,
         cfg: Vconfig,
@@ -342,6 +631,7 @@ impl Translator<'_> {
         vs2: u8,
         operand: Operand,
         f3: u32,
+        masked: bool,
     ) -> bool {
         let cc = match funct6 {
             0b011000 => IntCC::Equal,
@@ -388,10 +678,15 @@ impl Translator<'_> {
                 hi = self.b.ins().bor(hi, shifted);
             }
         }
-        // Results exist for elements below vl; with fractional LMUL there are fewer lanes, and
-        // vl <= VLMAX keeps the extra ones out.
-        let which = self.vl_bits(vl);
-        self.store_mask_bits(vd, (lo, hi), which);
+        // Results exist for elements below vl (and active ones, when masked); with fractional
+        // LMUL there are fewer lanes, and vl <= VLMAX keeps the extra ones out.
+        let (mut w_lo, mut w_hi) = self.vl_bits(vl);
+        if masked {
+            let (m_lo, m_hi) = self.load_mask(0);
+            w_lo = self.b.ins().band(w_lo, m_lo);
+            w_hi = self.b.ins().band(w_hi, m_hi);
+        }
+        self.store_mask_bits(vd, (lo, hi), (w_lo, w_hi));
         true
     }
 
@@ -502,8 +797,8 @@ impl Translator<'_> {
 
     /// Unit-stride loads (also fault-only-first) and stores of one register group, unmasked,
     /// when the whole group lies in one page that the TLB maps. Loads read the full group
-    /// (harmless within the page) and keep lanes past vl; stores are only native when vl is
-    /// VLMAX, since bytes past vl must not be written. Anything else uses the helper.
+    /// (harmless within the page) and keep lanes past vl; stores write only the bytes below
+    /// vl. Anything else uses the helper.
     fn vector_memory(&mut self, cfg: Vconfig, insn: &Insn, index: u64, offset: i64) -> bool {
         let raw = insn.raw;
         let store = insn.op == Op::Vstore;
@@ -548,13 +843,6 @@ impl Translator<'_> {
         let slow = self.b.create_block();
         let done = self.b.create_block();
         let access = if store { Access::Store } else { Access::Load };
-        if store {
-            // Only whole groups are stored natively.
-            let check_tlb = self.b.create_block();
-            let full = self.b.ins().icmp_imm_s(IntCC::Equal, vl, cfg.vlmax() as i64);
-            self.b.ins().brif(full, check_tlb, &[], slow, &[]);
-            self.b.switch_to_block(check_tlb);
-        }
         self.tlb_lookup(base, bytes.min(255) as u8, access, fast, slow);
         // tlb_lookup checks that `size` bytes fit in the page; groups larger than 255 bytes
         // cannot occur with 128-bit registers (8 x 16 = 128).
@@ -563,6 +851,17 @@ impl Translator<'_> {
         self.b.switch_to_block(fast);
         let guest = MemFlagsData::new().with_notrap();
         let ty = data.vector_type();
+        if store {
+            // Whole groups are stored a register at a time; a group cut short by vl byte by
+            // byte, since nothing past vl may be written.
+            let (whole, partial) = (self.b.create_block(), self.b.create_block());
+            let full = self.b.ins().icmp_imm_s(IntCC::Equal, vl, cfg.vlmax() as i64);
+            self.b.ins().brif(full, whole, &[], partial, &[]);
+            self.b.switch_to_block(partial);
+            let len = self.b.ins().imul_imm_s(vl, eew as i64);
+            self.store_bytes_loop(vd as u32, host, len, done);
+            self.b.switch_to_block(whole);
+        }
         for r in 0..regs {
             let at = (r * VLENB) as i32;
             if store {
