@@ -9,6 +9,7 @@ pub mod pci;
 pub mod queue;
 pub mod rng;
 pub mod snd;
+pub mod virgl;
 
 use std::sync::{Arc, Mutex};
 

@@ -9,10 +9,10 @@ use rv_core::GuestMemory;
 use super::{Activation, Chain, VirtioDevice, device_type, read_config_bytes};
 use crate::display::{CURSOR_SIZE, Display};
 
-const CONTROLQ: usize = 0;
-const CURSORQ: usize = 1;
+pub(super) const CONTROLQ: usize = 0;
+pub(super) const CURSORQ: usize = 1;
 
-mod cmd {
+pub(super) mod cmd {
     pub const GET_DISPLAY_INFO: u32 = 0x0100;
     pub const RESOURCE_CREATE_2D: u32 = 0x0101;
     pub const RESOURCE_UNREF: u32 = 0x0102;
@@ -33,16 +33,16 @@ mod cmd {
     pub const ERR_INVALID_PARAMETER: u32 = 0x1205;
 }
 
-const FLAG_FENCE: u32 = 1;
-const HEADER: usize = 24;
+pub(super) const FLAG_FENCE: u32 = 1;
+pub(super) const HEADER: usize = 24;
 const EVENT_DISPLAY: u32 = 1;
-const MAX_SCANOUTS: usize = 16;
+pub(super) const MAX_SCANOUTS: usize = 16;
 /// Host memory all resources together may use.
 const MAX_RESOURCE_BYTES: u64 = 1 << 30;
 
 /// Pixel formats (`enum virtio_gpu_formats`), by their byte order in memory.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Format {
+pub(super) enum Format {
     /// B, G, R, A/X: already the host layout.
     Bgrx,
     /// A/X, R, G, B.
@@ -54,7 +54,7 @@ enum Format {
 }
 
 impl Format {
-    fn from_virtio(f: u32) -> Option<Self> {
+    pub(super) fn from_virtio(f: u32) -> Option<Self> {
         Some(match f {
             1 | 2 => Format::Bgrx,
             3 | 4 => Format::Xrgb,
@@ -66,7 +66,7 @@ impl Format {
 
     /// Converts a pixel as stored (little-endian u32 of its bytes) to `0xAARRGGBB`.
     #[inline]
-    fn to_argb(self, p: u32) -> u32 {
+    pub(super) fn to_argb(self, p: u32) -> u32 {
         match self {
             Format::Bgrx => p,
             Format::Xrgb => p.swap_bytes(),
@@ -128,17 +128,17 @@ impl Resource {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Rect {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
+pub(super) struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// State the front end can reach to announce display changes.
-struct Shared {
-    events_read: u32,
-    active: Option<Activation>,
+pub(super) struct Shared {
+    pub events_read: u32,
+    pub active: Option<Activation>,
 }
 
 pub struct Gpu {
@@ -153,8 +153,8 @@ pub struct Gpu {
 /// Lets the front end tell the guest that the preferred display size changed.
 #[derive(Clone)]
 pub struct GpuHandle {
-    display: Arc<Display>,
-    shared: Arc<Mutex<Shared>>,
+    pub(super) display: Arc<Display>,
+    pub(super) shared: Arc<Mutex<Shared>>,
 }
 
 impl GpuHandle {
@@ -171,21 +171,31 @@ impl GpuHandle {
     }
 }
 
-fn trace() -> bool {
+pub(super) fn trace() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *TRACE.get_or_init(|| std::env::var_os("RV_GPU_TRACE").is_some())
 }
 
-fn u32_at(b: &[u8], at: usize) -> u32 {
+pub(super) fn u32_at(b: &[u8], at: usize) -> u32 {
     b.get(at..at + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 
-fn u64_at(b: &[u8], at: usize) -> u64 {
+pub(super) fn u64_at(b: &[u8], at: usize) -> u64 {
     b.get(at..at + 8).map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))
 }
 
-fn rect_at(b: &[u8], at: usize) -> Rect {
+pub(super) fn rect_at(b: &[u8], at: usize) -> Rect {
     Rect { x: u32_at(b, at), y: u32_at(b, at + 4), width: u32_at(b, at + 8), height: u32_at(b, at + 12) }
+}
+
+/// The GET_DISPLAY_INFO payload: one enabled scanout of the display's preferred size.
+pub(super) fn display_info(display: &Display) -> Vec<u8> {
+    let (w, h) = display.preferred_size();
+    let mut info = vec![0u8; 24 * MAX_SCANOUTS];
+    info[8..12].copy_from_slice(&w.to_le_bytes());
+    info[12..16].copy_from_slice(&h.to_le_bytes());
+    info[16..20].copy_from_slice(&1u32.to_le_bytes()); // enabled
+    info
 }
 
 impl Gpu {
@@ -201,14 +211,7 @@ impl Gpu {
         let kind = u32_at(req, 0);
         let body = &req[HEADER.min(req.len())..];
         match kind {
-            cmd::GET_DISPLAY_INFO => {
-                let (w, h) = self.display.preferred_size();
-                let mut info = vec![0u8; 24 * MAX_SCANOUTS];
-                info[8..12].copy_from_slice(&w.to_le_bytes());
-                info[12..16].copy_from_slice(&h.to_le_bytes());
-                info[16..20].copy_from_slice(&1u32.to_le_bytes()); // enabled
-                (cmd::OK_DISPLAY_INFO, info)
-            }
+            cmd::GET_DISPLAY_INFO => (cmd::OK_DISPLAY_INFO, display_info(&self.display)),
             cmd::RESOURCE_CREATE_2D => {
                 let (id, format, width, height) =
                     (u32_at(body, 0), u32_at(body, 4), u32_at(body, 8), u32_at(body, 12));

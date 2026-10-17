@@ -91,6 +91,7 @@ pub struct SnapshotHandle {
     rtc: Arc<rtc::GoldfishRtc>,
     pci: Arc<pci::PciHost>,
     fingerprint: String,
+    blocker: Option<&'static str>,
     /// Some disk is written through to its image (the snapshot does not capture it).
     pub disks_written_through: bool,
 }
@@ -98,6 +99,9 @@ pub struct SnapshotHandle {
 impl SnapshotHandle {
     /// Pauses the machine, writes the snapshot to `path` and lets the machine continue.
     pub fn save(&self, path: &Path) -> Result<(), String> {
+        if let Some(why) = self.blocker {
+            return Err(format!("snapshots are not supported: {why}"));
+        }
         let started = Instant::now();
         self.memory.set_frozen(true);
         {
@@ -203,12 +207,16 @@ impl Machine {
             rtc: self.rtc.clone(),
             pci: self.pci.clone(),
             fingerprint: self.fingerprint.clone(),
+            blocker: self.snapshot_blocker,
             disks_written_through: self.disks_written_through,
         }
     }
 
     /// Replaces this (not yet started) machine's state with the snapshot at `path`.
     pub fn restore(&mut self, path: &Path) -> Result<(), String> {
+        if let Some(why) = self.snapshot_blocker {
+            return Err(format!("snapshots are not supported: {why}"));
+        }
         let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut input = BufReader::with_capacity(1 << 20, file);
         let mut read = |n: usize| -> Result<Vec<u8>, String> {

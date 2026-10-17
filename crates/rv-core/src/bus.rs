@@ -212,6 +212,22 @@ impl GuestMemory {
         Ok(())
     }
 
+    /// Host address of guest RAM `addr..addr + len`, for handing guest buffers to host
+    /// libraries. Writes made through it must be reported with [`GuestMemory::note_written`].
+    pub fn host_ptr(&self, addr: u64, len: u64) -> Result<*mut u8, DmaError> {
+        Ok(self.ram.host_ptr(self.offset(addr, len)?))
+    }
+
+    /// Reports that `addr..addr + len` was written other than through [`GuestMemory::write`].
+    pub fn note_written(&self, addr: u64, len: u64) {
+        let Ok(off) = self.offset(addr, len) else { return };
+        if len > 0 {
+            for page in (off >> PAGE_SHIFT)..=((off + len - 1) >> PAGE_SHIFT) {
+                self.code.note_write(page as usize);
+            }
+        }
+    }
+
     /// Loads a naturally aligned little-endian value of `size` bytes atomically.
     pub fn load(&self, addr: u64, size: u8) -> Result<u64, DmaError> {
         Ok(self.ram.load(self.offset(addr, size as u64)?, size))

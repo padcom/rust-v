@@ -101,6 +101,8 @@ pub struct MachineConfig {
     pub net: Option<rv_net::Config>,
     /// Add a virtio-gpu device showing on this display, with a virtio keyboard and tablet.
     pub display: Option<Arc<display::Display>>,
+    /// Accelerate the GPU's 3D rendering on the host through virglrenderer (with a display).
+    pub virgl: bool,
     /// Add a virtio-snd device with one playback stream.
     pub sound: bool,
     /// Host directories shared with the guest over virtio-9p.
@@ -143,6 +145,7 @@ impl Default for MachineConfig {
             rng: true,
             net: None,
             display: None,
+            virgl: false,
             sound: false,
             shares: Vec::new(),
         }
@@ -178,6 +181,8 @@ pub struct Machine {
     loaded: Vec<(u64, u64)>,
     /// What a snapshot must have been taken on to be restored here.
     fingerprint: String,
+    /// Why snapshots cannot be taken of this machine, if they cannot.
+    snapshot_blocker: Option<&'static str>,
     disks_written_through: bool,
 }
 
@@ -276,9 +281,16 @@ impl Machine {
         }
         let (mut gpu, mut keyboard, mut tablet) = (None, None, None);
         if let Some(display) = config.display {
-            let (dev, handle) = virtio::gpu::Gpu::new(display);
-            gpu = Some(handle);
-            virtio_devices.push(Box::new(dev));
+            if config.virgl {
+                let (dev, handle) = virtio::virgl::VirglGpu::new(display)
+                    .map_err(|e| Error::Layout(format!("3D acceleration: {e}")))?;
+                gpu = Some(handle);
+                virtio_devices.push(Box::new(dev));
+            } else {
+                let (dev, handle) = virtio::gpu::Gpu::new(display);
+                gpu = Some(handle);
+                virtio_devices.push(Box::new(dev));
+            }
             let (dev, handle) = virtio::input::Input::new(virtio::input::Kind::Keyboard);
             keyboard = Some(handle);
             virtio_devices.push(Box::new(dev));
@@ -438,6 +450,9 @@ impl Machine {
             rtc,
             loaded,
             fingerprint,
+            snapshot_blocker: config
+                .virgl
+                .then_some("the 3D-accelerated GPU's state lives in the host's OpenGL"),
             disks_written_through,
         })
     }

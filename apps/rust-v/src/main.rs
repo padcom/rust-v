@@ -80,6 +80,10 @@ struct Args {
     /// Initial display resolution, e.g. 1920x1080.
     #[arg(long, default_value = "1280x800", value_parser = parse_resolution)]
     resolution: (u32, u32),
+    /// GPU rendering: `2d` (the guest renders in software) or `virgl` (OpenGL is accelerated
+    /// on the host through virglrenderer, which must be installed).
+    #[arg(long, default_value = "2d", value_parser = ["2d", "virgl"])]
+    gpu: String,
     /// Do not add a sound card (one is added along with a display).
     #[arg(long)]
     no_sound: bool,
@@ -318,6 +322,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
             .then(|| rv_machine::rv_net::Config { tcp_forwards: args.forward.clone(), ..Default::default() }),
         display: (args.display != "none")
             .then(|| rv_machine::display::Display::new(args.resolution.0, args.resolution.1)),
+        virgl: args.gpu == "virgl",
         sound: args.display != "none" && !args.no_sound,
         shares: args.share.iter().enumerate().map(|(i, s)| parse_share(i, s)).collect::<Result<_, _>>()?,
     };

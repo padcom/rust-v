@@ -92,6 +92,64 @@ with a serial console added and takes screenshots.
 | `--resolution 1920x1080` | initial display size (the guest is offered the window size after resizing) |
 | `--screenshot shot.png` | save the display every two seconds while it changes |
 | `--no-sound` | no sound card (one comes with a display) |
+| `--gpu 2d\|virgl` | software rendering in the guest (default), or OpenGL accelerated on the host |
+
+### 3D acceleration
+
+With `--gpu virgl` the GPU offers virtio-gpu's 3D mode: the guest's Mesa (the `virgl`
+driver, part of every Ubuntu desktop) sends its rendering to the host, where
+[virglrenderer](https://gitlab.freedesktop.org/virgl/virglrenderer) replays it on the host's
+OpenGL. GNOME's compositing and the browser's GPU rasterisation then no longer run on
+the emulated CPU. virglrenderer is loaded when the option is used, so it is only needed then:
+
+| Host | Install | OpenGL used |
+|---|---|---|
+| Linux | `apt install libvirglrenderer1` (or your distribution's package) | EGL from the host's driver; surfaceless, so no display server is needed |
+| macOS | `brew install virglrenderer` | Apple's OpenGL 4.1 (on Metal), through contexts rust-v creates |
+
+`RUST_V_VIRGL=/path/to/libvirglrenderer` picks a specific build. Snapshots are not available
+with `--gpu virgl` (the GPU's state lives in the host's OpenGL).
+
+## Shared folders, snapshots, configuration
+
+```sh
+# A host directory in the guest (virtio-9p); in the guest:
+#   sudo mount -t 9p -o trans=virtio,version=9p2000.L share0 /mnt
+rust-v ... --share ~/src            # options: ,tag=NAME ,ro ,uid=N ,gid=N
+
+# Ctrl-A s saves the running machine to --snapshot-file (default rust-v.snapshot);
+# start again from it with the same options:
+rust-v ... --restore rust-v.snapshot
+```
+
+A snapshot holds the CPUs, RAM, devices and the in-memory writes of `,snapshot` disks. Disks
+written through to their image are not part of it, so restoring after the guest wrote more to
+them gives it a disk that no longer matches its memory (rust-v warns when saving).
+
+`--config vm.toml` reads options from a TOML file; keys are option names, arrays repeat an
+option, relative paths are relative to the file, and the command line wins:
+
+```toml
+memory = "8G"
+disk = ["ubuntu.img"]
+display = "window"
+gpu = "virgl"
+forward = ["2222:22"]
+share = ["~/src,tag=src"]
+```
+
+`rust-v image` manages raw disk images: `create IMG --size 32G` (sparse), `resize IMG --size
+64G` (Ubuntu grows its root partition on the next boot), `clone SRC DST` (copy-on-write on
+APFS, Btrfs and XFS) and `info IMG` (size, allocated space, partition table).
+
+## Packages
+
+`scripts/package.sh TARGET` (after `cargo build --release --target TARGET`) builds a release
+archive in `dist/`: the binary, the bundled firmware (OpenSBI and U-Boot in `firmware/` next
+to the binary, so `--bios` and `--kernel` can be left out) and this README. On macOS the
+binary is signed with the JIT entitlement (`packaging/macos/rust-v.entitlements`), ad hoc
+unless `MACOS_SIGNING_IDENTITY` is set. Pushing a `v*` tag builds archives for macOS, Linux
+and Windows (x86-64 and arm64) in CI.
 
 ## Testing
 

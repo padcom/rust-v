@@ -88,6 +88,8 @@ class Guest:
                 break
             self.wait(r"login: ")
             time.sleep(3)
+        if b"$" in m.group(0):
+            return
         if b"Current" in m.group(0):
             self.send(password + "\n"); self.wait(r"New password: ")
             self.send(new_password + "\n"); self.wait(r"Retype new password: ")

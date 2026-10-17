@@ -1,0 +1,6 @@
+# Linux environment for testing rust-v's virgl GPU acceleration on a headless machine:
+# virglrenderer with Mesa's surfaceless EGL (llvmpipe when there is no GPU).
+FROM docker.io/library/rust:1
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      libasound2-dev pkg-config python3 libvirglrenderer1 libegl1 libgl1 libopengl0 libegl-mesa0 libgl1-mesa-dri \
+    && rm -rf /var/lib/apt/lists/*
