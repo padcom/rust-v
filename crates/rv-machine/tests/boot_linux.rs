@@ -43,6 +43,12 @@ impl Capture {
     }
 }
 
+/// How long to wait for each step; `RUST_V_TEST_TIMEOUT` (seconds) raises it on slow or
+/// emulated hosts.
+fn test_timeout() -> Duration {
+    Duration::from_secs(std::env::var("RUST_V_TEST_TIMEOUT").ok().and_then(|v| v.parse().ok()).unwrap_or(120))
+}
+
 fn image(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/guest").join(name);
     std::fs::read(&path)
@@ -129,7 +135,7 @@ fn boot(jit: bool, jit_cache_size: usize) {
     let uart = machine.uart.clone();
     let runner = std::thread::spawn(move || machine.run());
 
-    let timeout = Duration::from_secs(120);
+    let timeout = test_timeout();
     let mut pos = console.wait_for("OpenSBI v", 0, timeout);
     pos = console.wait_for("Linux version", pos, timeout);
     pos = console.wait_for("rust-v: busybox userland ready", pos, timeout);
@@ -231,7 +237,7 @@ fn snapshot_and_restore() {
         }],
         ..MachineConfig::default()
     };
-    let timeout = Duration::from_secs(120);
+    let timeout = test_timeout();
     let path = std::env::temp_dir().join(format!("rust-v-test-{}.snapshot", std::process::id()));
 
     let console = Capture::default();

@@ -17,6 +17,8 @@ ENGINE="${CONTAINER_ENGINE:-$(command -v podman || command -v docker)}"
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-linux-gnu-gcc
     if [ "$(uname -m)" != x86_64 ]; then
       export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="qemu-x86_64 -L /usr/x86_64-linux-gnu"
+      # Everything runs about ten times slower under emulation.
+      export RUST_V_TEST_TIMEOUT=1500
     fi
     cargo test --release --target x86_64-unknown-linux-gnu -p rv-isa -p rv-softfloat -p rv-core -p rv-jit \
       -p rv-net -p rv-machine -p rv-conformance -- --include-ignored '"$*"'
