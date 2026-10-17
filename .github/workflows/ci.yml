@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-13, windows-latest, windows-11-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -21,17 +21,24 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
 
   riscv-tests:
-    name: riscv-tests
-    runs-on: ubuntu-latest
+    name: riscv-tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf
+      - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-unknown-elf libasound2-dev
       - run: RISCV_PREFIX=riscv64-unknown-elf- scripts/build-riscv-tests.sh
-      - run: cargo test --release -p rv-conformance -- --ignored
+      # Interpreter, per-hart JIT and the shared pool, each also with a tiny code cache.
+      - run: cargo test --release -p rv-conformance -- --ignored riscv_tests
