@@ -4,6 +4,7 @@ pub mod blk;
 pub mod gpu;
 pub mod input;
 pub mod net;
+pub mod p9;
 pub mod pci;
 pub mod queue;
 pub mod rng;

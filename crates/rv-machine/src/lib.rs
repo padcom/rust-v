@@ -102,6 +102,18 @@ pub struct MachineConfig {
     pub display: Option<Arc<display::Display>>,
     /// Add a virtio-snd device with one playback stream.
     pub sound: bool,
+    /// Host directories shared with the guest over virtio-9p.
+    pub shares: Vec<Share>,
+}
+
+/// A host directory shared with the guest (mount tag `tag`).
+pub struct Share {
+    pub path: std::path::PathBuf,
+    pub tag: String,
+    pub read_only: bool,
+    /// Owner the guest sees for every file.
+    pub uid: u32,
+    pub gid: u32,
 }
 
 /// A virtio-blk disk.
@@ -131,6 +143,7 @@ impl Default for MachineConfig {
             net: None,
             display: None,
             sound: false,
+            shares: Vec::new(),
         }
     }
 }
@@ -257,6 +270,12 @@ impl Machine {
             virtio_devices.push(Box::new(dev));
             let (dev, handle) = virtio::input::Input::new(virtio::input::Kind::Tablet);
             tablet = Some(handle);
+            virtio_devices.push(Box::new(dev));
+        }
+        for share in config.shares {
+            let dev =
+                virtio::p9::P9::new(share.path.clone(), &share.tag, share.read_only, share.uid, share.gid)
+                    .map_err(|e| Error::Layout(format!("share {}: {e}", share.path.display())))?;
             virtio_devices.push(Box::new(dev));
         }
         let mut audio = None;

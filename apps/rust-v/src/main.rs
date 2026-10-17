@@ -83,6 +83,11 @@ struct Args {
     /// Do not add a sound card (one is added along with a display).
     #[arg(long)]
     no_sound: bool,
+    /// Share a host directory with the guest over virtio-9p (repeatable). Mount it in the
+    /// guest with `mount -t 9p -o trans=virtio,version=9p2000.L TAG /mnt`. Options: tag=NAME
+    /// (default share0, share1, ...), ro, uid=N and gid=N (owner shown in the guest, 1000).
+    #[arg(long, value_name = "DIR[,tag=NAME][,ro][,uid=N][,gid=N]")]
+    share: Vec<String>,
     /// Do not add a network card.
     #[arg(long)]
     no_net: bool,
@@ -218,6 +223,24 @@ fn open_disk(spec: &str) -> Result<rv_machine::Drive, String> {
     Ok(rv_machine::Drive { backend, read_only })
 }
 
+fn parse_share(index: usize, spec: &str) -> Result<rv_machine::Share, String> {
+    let mut parts = spec.split(',');
+    let path = PathBuf::from(parts.next().unwrap_or_default());
+    let mut share =
+        rv_machine::Share { path, tag: format!("share{index}"), read_only: false, uid: 1000, gid: 1000 };
+    for option in parts {
+        let bad = || format!("{spec}: unknown share option `{option}`");
+        match option.split_once('=') {
+            None if option == "ro" => share.read_only = true,
+            Some(("tag", v)) if !v.is_empty() && v.len() <= 31 => share.tag = v.to_string(),
+            Some(("uid", v)) => share.uid = v.parse().map_err(|_| bad())?,
+            Some(("gid", v)) => share.gid = v.parse().map_err(|_| bad())?,
+            _ => return Err(bad()),
+        }
+    }
+    Ok(share)
+}
+
 fn run_machine(machine: &mut Machine, gdb: Option<&str>) -> Result<Shutdown, String> {
     match gdb {
         Some(addr) => {
@@ -272,6 +295,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
         display: (args.display != "none")
             .then(|| rv_machine::display::Display::new(args.resolution.0, args.resolution.1)),
         sound: args.display != "none" && !args.no_sound,
+        shares: args.share.iter().enumerate().map(|(i, s)| parse_share(i, s)).collect::<Result<_, _>>()?,
     };
     if let (Some(display), Some(path)) = (&config.display, &args.screenshot) {
         screenshot::spawn(display.clone(), path.clone(), std::time::Duration::from_secs(2));

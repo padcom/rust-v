@@ -98,7 +98,20 @@ fn boot(jit: bool, jit_cache_size: usize) {
     // Any free host port, forwarded to the guest's port 8080.
     let forward: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
     disk[..16].copy_from_slice(b"RUST-V DISK TEST");
+    // A host directory shared over virtio-9p.
+    let share_dir =
+        std::env::temp_dir().join(format!("rust-v-boot-share-{}-{jit}-{jit_cache_size}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&share_dir);
+    std::fs::create_dir_all(&share_dir).unwrap();
+    std::fs::write(share_dir.join("from-host.txt"), "shared-by-host").unwrap();
     let config = MachineConfig {
+        shares: vec![rv_machine::Share {
+            path: share_dir.clone(),
+            tag: "hostshare".into(),
+            read_only: false,
+            uid: 1000,
+            gid: 1000,
+        }],
         drives: vec![Drive { backend: Box::new(disk), read_only: false }],
         net: Some(rv_machine::rv_net::Config { tcp_forwards: vec![(forward, 8080)], ..Default::default() }),
         bios: image("fw_dynamic.bin"),
@@ -111,6 +124,7 @@ fn boot(jit: bool, jit_cache_size: usize) {
         ..MachineConfig::default()
     };
     let mut machine = Machine::new(config, Box::new(console.clone())).unwrap();
+    let shared = share_dir.clone();
     let forward = machine.forwarded[0];
     let uart = machine.uart.clone();
     let runner = std::thread::spawn(move || machine.run());
@@ -176,6 +190,15 @@ fn boot(jit: bool, jit_cache_size: usize) {
     let mut reply = String::new();
     std::io::Read::read_to_string(&mut stream, &mut reply).unwrap();
     assert_eq!(reply, "fwd-25\n");
+    // virtio-9p: read a host file, write one back.
+    uart.push_input(
+        b"mkdir -p /mnt/h && mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/h && \
+          cat /mnt/h/from-host.txt && echo; echo written-by-guest > /mnt/h/from-guest.txt && sync; echo 9p-$((3+4))\n",
+    );
+    pos = console.wait_for("9p-7", pos, timeout);
+    assert!(console.text().contains("shared-by-host"), "guest did not read the shared file");
+    assert_eq!(std::fs::read_to_string(shared.join("from-guest.txt")).unwrap(), "written-by-guest\n");
+    std::fs::remove_dir_all(&shared).unwrap();
     uart.push_input(b"poweroff\n");
     console.wait_for("reboot: Power down", pos, timeout);
 
