@@ -100,7 +100,9 @@ impl InputHandle {
             e[4..8].copy_from_slice(&value.to_le_bytes());
             s.pending.push_back(e);
         }
-        s.deliver();
+        if !s.active.as_ref().is_some_and(|a| a.mem.frozen()) {
+            s.deliver();
+        }
     }
 }
 
@@ -225,5 +227,16 @@ impl VirtioDevice for Input {
 
     fn pci_class(&self) -> u32 {
         0x09_80_00
+    }
+
+    fn save_state(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u8(self.select);
+        w.u8(self.subsel);
+    }
+
+    fn restore_state(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.select = r.u8()?;
+        self.subsel = r.u8()?;
+        Ok(())
     }
 }

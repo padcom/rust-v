@@ -91,7 +91,9 @@ impl RxHandle {
             rx.pending.pop_front();
         }
         rx.pending.push_back(frame);
-        rx.deliver();
+        if !rx.active.as_ref().is_some_and(|a| a.mem.frozen()) {
+            rx.deliver();
+        }
     }
 }
 

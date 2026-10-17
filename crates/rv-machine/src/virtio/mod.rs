@@ -66,6 +66,16 @@ impl Interrupt {
         self.intx.set(true);
     }
 
+    fn isr(&self) -> u8 {
+        *self.isr.lock().unwrap()
+    }
+
+    /// Sets the ISR status (when restoring a snapshot) and the line to match.
+    fn set_isr(&self, v: u8) {
+        *self.isr.lock().unwrap() = v;
+        self.intx.set(v != 0);
+    }
+
     /// Reads and clears the ISR status, deasserting the line.
     fn take(&self) -> u8 {
         let mut isr = self.isr.lock().unwrap();
@@ -124,6 +134,15 @@ pub trait VirtioDevice: Send {
     fn reset(&mut self);
     /// PCI class code for the device.
     fn pci_class(&self) -> u32;
+
+    /// Device state for a snapshot (beyond the queues, which the transport saves). Called
+    /// with the machine paused.
+    fn save_state(&self, _w: &mut rv_core::snapshot::Writer) {}
+
+    /// Restores what `save_state` wrote, before the device is activated again.
+    fn restore_state(&mut self, _r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        Ok(())
+    }
 }
 
 /// Copies the part of `config` that `offset..offset + data.len()` covers into `data`.

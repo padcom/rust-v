@@ -247,6 +247,12 @@ impl Hart {
         }
     }
 
+    pub(crate) fn flush_jit_for_restore(&mut self) {
+        if self.compiler.is_some() {
+            self.flush_jit();
+        }
+    }
+
     /// Drops every reference to compiled code and empties the code cache.
     fn flush_jit(&mut self) {
         for b in self.blocks.blocks_mut() {

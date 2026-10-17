@@ -38,17 +38,28 @@ pub trait TimeSource: Send + Sync {
 pub struct HostClock {
     start: Instant,
     freq_hz: u64,
+    /// Added to the elapsed time (so that a restored machine's time continues where it was).
+    base: AtomicU64,
 }
 
 impl HostClock {
     pub fn new(freq_hz: u64) -> Self {
-        HostClock { start: Instant::now(), freq_hz }
+        HostClock { start: Instant::now(), freq_hz, base: AtomicU64::new(0) }
+    }
+
+    fn elapsed(&self) -> u64 {
+        (self.start.elapsed().as_nanos() * self.freq_hz as u128 / 1_000_000_000) as u64
+    }
+
+    /// Makes the clock read `mtime` now, counting on from there.
+    pub fn set(&self, mtime: u64) {
+        self.base.store(mtime.wrapping_sub(self.elapsed()), Ordering::SeqCst);
     }
 }
 
 impl TimeSource for HostClock {
     fn mtime(&self) -> u64 {
-        (self.start.elapsed().as_nanos() * self.freq_hz as u128 / 1_000_000_000) as u64
+        self.base.load(Ordering::Relaxed).wrapping_add(self.elapsed())
     }
 }
 

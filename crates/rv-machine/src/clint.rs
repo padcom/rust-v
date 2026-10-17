@@ -39,6 +39,19 @@ impl Clint {
         self.mtimecmp[hart].load(Ordering::Relaxed)
     }
 
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        for m in &self.mtimecmp {
+            w.u64(m.load(Ordering::Relaxed));
+        }
+    }
+
+    pub fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        for m in &self.mtimecmp {
+            m.store(r.u64()?, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
     /// Re-evaluates MTIP for one hart.
     pub fn update_timer(&self, hart: usize) {
         self.update_timer_at(hart, &self.harts[hart], self.time.mtime());

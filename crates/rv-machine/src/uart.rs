@@ -62,6 +62,26 @@ impl Uart {
         }
     }
 
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        let s = self.state.lock().unwrap();
+        for v in [s.ier, s.lcr, s.mcr, s.fcr, s.scr, s.dll, s.dlm] {
+            w.u8(v);
+        }
+        w.bool(s.thr_interrupt);
+        w.bytes(&s.rx.iter().copied().collect::<Vec<u8>>());
+    }
+
+    pub fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut guard = self.state.lock().unwrap();
+        let s = &mut *guard;
+        for v in [&mut s.ier, &mut s.lcr, &mut s.mcr, &mut s.fcr, &mut s.scr, &mut s.dll, &mut s.dlm] {
+            *v = r.u8()?;
+        }
+        s.thr_interrupt = r.bool()?;
+        s.rx = r.bytes()?.iter().copied().collect();
+        Ok(())
+    }
+
     /// Queues bytes typed on the host console.
     pub fn push_input(&self, bytes: &[u8]) {
         let mut s = self.state.lock().unwrap();

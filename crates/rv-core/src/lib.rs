@@ -10,6 +10,7 @@ pub mod hart;
 pub mod jit;
 pub mod mem;
 pub mod mmu;
+pub mod snapshot;
 pub mod trap;
 pub mod vector;
 

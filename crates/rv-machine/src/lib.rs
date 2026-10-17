@@ -9,6 +9,7 @@ pub mod pci;
 pub mod plic;
 pub mod power;
 pub mod rtc;
+pub mod snapshot;
 pub mod uart;
 pub mod virtio;
 
@@ -170,6 +171,14 @@ pub struct Machine {
     /// JIT compilation statistics per hart, when the JIT is enabled.
     pub jit_stats: Option<Vec<Arc<rv_jit::Stats>>>,
     threaded: bool,
+    pause: Arc<snapshot::Pause>,
+    clock: Arc<HostClock>,
+    rtc: Arc<rtc::GoldfishRtc>,
+    /// RAM ranges filled at start-up (cleared before a snapshot is restored).
+    loaded: Vec<(u64, u64)>,
+    /// What a snapshot must have been taken on to be restored here.
+    fingerprint: String,
+    disks_written_through: bool,
 }
 
 /// Execution statistics.
@@ -224,7 +233,8 @@ impl Machine {
         }
         let ram_size = config.ram_size;
         let ram_end = RAM_BASE + ram_size;
-        let time: Arc<dyn TimeSource> = Arc::new(HostClock::new(TIMEBASE_HZ));
+        let clock = Arc::new(HostClock::new(TIMEBASE_HZ));
+        let time: Arc<dyn TimeSource> = clock.clone();
         let shared: Vec<Arc<HartShared>> = (0..num_harts).map(|_| Arc::new(HartShared::default())).collect();
 
         let clint = Arc::new(clint::Clint::new(shared.clone(), time.clone()));
@@ -234,7 +244,8 @@ impl Machine {
 
         let mut bus = Bus::new(RAM_BASE, ram_size);
         bus.add_device(TEST_BASE, power::SIZE, Arc::new(power::TestDevice::new(power.clone())));
-        bus.add_device(RTC_BASE, rtc::SIZE, Arc::new(rtc::GoldfishRtc::default()));
+        let rtc = Arc::new(rtc::GoldfishRtc::default());
+        bus.add_device(RTC_BASE, rtc::SIZE, rtc.clone());
         bus.add_device(CLINT_BASE, clint::SIZE, clint.clone());
         bus.add_device(PLIC_BASE, plic::SIZE, plic.clone());
         bus.add_device(UART_BASE, uart::SIZE, uart.clone());
@@ -247,9 +258,12 @@ impl Machine {
             bus.add_device(base, size, Arc::new(pci::MemWindow { host: pci.clone(), base }));
         }
         let mut virtio_devices: Vec<Box<dyn virtio::VirtioDevice>> = Vec::new();
+        let mut disks_written_through = false;
         for (i, drive) in config.drives.into_iter().enumerate() {
             let id = format!("rust-v-disk{i}");
-            virtio_devices.push(Box::new(virtio::blk::Blk::new(drive.backend, drive.read_only, &id)));
+            let blk = virtio::blk::Blk::new(drive.backend, drive.read_only, &id);
+            disks_written_through |= blk.writes_through();
+            virtio_devices.push(Box::new(blk));
         }
         let mut forwarded = Vec::new();
         if let Some(net_config) = config.net {
@@ -287,6 +301,13 @@ impl Machine {
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
         }
+        let device_types: Vec<String> = virtio_devices.iter().map(|d| d.device_type().to_string()).collect();
+        let fingerprint = format!(
+            "ram={ram_size} harts={num_harts} vlen={} satp={} devices={}",
+            config.vlen,
+            config.max_satp_mode,
+            device_types.join(",")
+        );
         for device in virtio_devices {
             let slot = pci.free_slot().ok_or_else(|| Error::Layout("out of PCI slots".into()))?;
             pci.attach(slot, Arc::new(virtio::VirtioPci::new(device, bus.memory(), pci.intx(slot))));
@@ -305,10 +326,12 @@ impl Machine {
         let dtb_addr = ram_end - (2 << 20);
         let info_addr = dtb_addr - 0x1000;
         fits("firmware", RAM_BASE, config.bios.len() as u64, kernel_addr)?;
+        let mut loaded = vec![(RAM_BASE, config.bios.len() as u64)];
         bus.load_image(RAM_BASE, &config.bios);
         if let Some(kernel) = &config.kernel {
             fits("kernel", kernel_addr, kernel.len() as u64, info_addr)?;
             bus.load_image(kernel_addr, kernel);
+            loaded.push((kernel_addr, kernel.len() as u64));
         }
         let initrd = match &config.initrd {
             Some(data) => {
@@ -316,6 +339,7 @@ impl Machine {
                 let start = align_up((RAM_BASE + ram_size / 2).max(kernel_end + (16 << 20)), 2 << 20);
                 fits("initrd", start, data.len() as u64, info_addr)?;
                 bus.load_image(start, data);
+                loaded.push((start, data.len() as u64));
                 Some((start, start + data.len() as u64))
             }
             None => None,
@@ -338,10 +362,12 @@ impl Machine {
         .map_err(Error::Fdt)?;
         fits("device tree", dtb_addr, dtb.len() as u64, ram_end)?;
         bus.load_image(dtb_addr, &dtb);
+        loaded.push((dtb_addr, dtb.len() as u64));
 
         let info = [FW_DYNAMIC_MAGIC, FW_DYNAMIC_VERSION, kernel_addr, NEXT_MODE_S, 0, u64::MAX];
         let info_bytes: Vec<u8> = info.iter().flat_map(|v| v.to_le_bytes()).collect();
         bus.load_image(info_addr, &info_bytes);
+        loaded.push((info_addr, info_bytes.len() as u64));
 
         let bus = Arc::new(bus);
         let mut jit_stats = None;
@@ -407,6 +433,12 @@ impl Machine {
             stats: Stats::default(),
             jit_stats,
             threaded: config.threaded,
+            pause: Arc::new(snapshot::Pause::default()),
+            clock,
+            rtc,
+            loaded,
+            fingerprint,
+            disks_written_through,
         })
     }
 
@@ -416,7 +448,7 @@ impl Machine {
         if !self.threaded || self.harts.len() == 1 {
             return self.run_sequential();
         }
-        let (clint, power) = (&*self.clint, &*self.power);
+        let (clint, power, pause) = (&*self.clint, &*self.power, &*self.pause);
         let per_hart: Vec<Stats> = std::thread::scope(|scope| {
             let threads: Vec<_> = self
                 .harts
@@ -434,6 +466,7 @@ impl Machine {
                                 if service_hart(clint, power, id, hart, exit == Exit::Wfi, &mut stats) {
                                     return stats;
                                 }
+                                pause.check(id, hart);
                             }
                         })
                         .expect("failed to spawn a hart thread")
@@ -467,6 +500,7 @@ impl Machine {
     /// Housekeeping after every hart ran a slice in sequential mode: timers, shutdown requests,
     /// and idling (for at most `MAX_IDLE`) when every hart is waiting in WFI.
     pub fn tick(&mut self, exits: &[Exit]) -> Option<Shutdown> {
+        self.pause.check_all(&self.harts);
         self.clint.update_timers();
         for hart in &mut self.harts {
             hart.update_timer_interrupts();

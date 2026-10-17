@@ -80,6 +80,8 @@ struct Resource {
     width: u32,
     height: u32,
     format: Format,
+    /// The guest's format code (`enum virtio_gpu_formats`).
+    virtio_format: u32,
     /// Host copy, in the guest's pixel format.
     pixels: Vec<u32>,
     /// Guest memory backing the resource: (address, length) pieces in order.
@@ -224,7 +226,15 @@ impl Gpu {
                 let pixels = vec![0; (width * height) as usize];
                 self.resources.insert(
                     id,
-                    Resource { width, height, format, pixels, backing: Vec::new(), starts: Vec::new() },
+                    Resource {
+                        width,
+                        height,
+                        format,
+                        virtio_format: u32_at(body, 4),
+                        pixels,
+                        backing: Vec::new(),
+                        starts: Vec::new(),
+                    },
                 );
                 (cmd::OK_NODATA, vec![])
             }
@@ -470,6 +480,73 @@ impl VirtioDevice for Gpu {
 
     fn pci_class(&self) -> u32 {
         0x03_80_00
+    }
+
+    fn save_state(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u32(self.shared.lock().unwrap().events_read);
+        w.u64(self.resources.len() as u64);
+        for (&id, res) in &self.resources {
+            w.u32(id);
+            w.u32(res.width);
+            w.u32(res.height);
+            w.u32(res.virtio_format);
+            w.bytes(&res.pixels.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<u8>>());
+            w.u64(res.backing.len() as u64);
+            for &(addr, len) in &res.backing {
+                w.u64(addr);
+                w.u32(len);
+            }
+        }
+        match self.scanout {
+            Some((id, r)) => {
+                w.bool(true);
+                for v in [id, r.x, r.y, r.width, r.height] {
+                    w.u32(v);
+                }
+            }
+            None => w.bool(false),
+        }
+    }
+
+    fn restore_state(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.shared.lock().unwrap().events_read = r.u32()?;
+        self.resources.clear();
+        self.resource_bytes = 0;
+        for _ in 0..r.u64()? {
+            let (id, width, height, virtio_format) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+            let format = Format::from_virtio(virtio_format).ok_or("bad GPU resource in snapshot")?;
+            let pixels: Vec<u32> =
+                r.bytes()?.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+            if pixels.len() != (width * height) as usize {
+                return Err("bad GPU resource in snapshot".into());
+            }
+            let mut backing = Vec::new();
+            for _ in 0..r.u64()? {
+                backing.push((r.u64()?, r.u32()?));
+            }
+            let mut res = Resource {
+                width,
+                height,
+                format,
+                virtio_format,
+                pixels,
+                backing: Vec::new(),
+                starts: Vec::new(),
+            };
+            res.set_backing(backing);
+            self.resource_bytes += 4 * width as u64 * height as u64;
+            self.resources.insert(id, res);
+        }
+        self.scanout = if r.bool()? {
+            let id = r.u32()?;
+            Some((id, Rect { x: r.u32()?, y: r.u32()?, width: r.u32()?, height: r.u32()? }))
+        } else {
+            None
+        };
+        if let Some((_, view)) = self.scanout {
+            self.present(view);
+        }
+        Ok(())
     }
 }
 

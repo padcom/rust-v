@@ -36,6 +36,19 @@ pub trait Backend: Send {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
     fn write_at(&mut self, offset: u64, data: &[u8]) -> io::Result<()>;
     fn flush(&mut self) -> io::Result<()>;
+
+    /// Contents a snapshot must carry (a copy-on-write layer's changes); files keep theirs.
+    fn save(&self, _w: &mut rv_core::snapshot::Writer) {}
+
+    fn restore(&mut self, _r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        Ok(())
+    }
+
+    /// Whether the image itself changes as the guest writes (so a snapshot does not capture
+    /// the disk).
+    fn writes_through(&self) -> bool {
+        true
+    }
 }
 
 /// A raw image file.
@@ -200,6 +213,33 @@ impl Backend for Overlay {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+
+    fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u64(self.blocks.len() as u64);
+        for (&block, data) in &self.blocks {
+            w.u64(block);
+            w.bytes(&data[..]);
+        }
+    }
+
+    fn restore(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.blocks.clear();
+        for _ in 0..r.u64()? {
+            let block = r.u64()?;
+            let data: Box<[u8; OVERLAY_BLOCK]> = r
+                .bytes()?
+                .to_vec()
+                .into_boxed_slice()
+                .try_into()
+                .map_err(|_| "bad disk block in snapshot")?;
+            self.blocks.insert(block, data);
+        }
+        Ok(())
+    }
+
+    fn writes_through(&self) -> bool {
+        false
+    }
 }
 
 pub struct Blk {
@@ -210,6 +250,11 @@ pub struct Blk {
 }
 
 impl Blk {
+    /// Whether the disk image changes as the guest writes (snapshots do not capture it).
+    pub fn writes_through(&self) -> bool {
+        !self.read_only && self.backend.lock().unwrap().writes_through()
+    }
+
     pub fn new(backend: Box<dyn Backend>, read_only: bool, id: &str) -> Self {
         Blk { backend: Mutex::new(backend), read_only, id: id.into(), active: None }
     }
@@ -332,6 +377,20 @@ impl VirtioDevice for Blk {
 
     fn pci_class(&self) -> u32 {
         0x01_00_00
+    }
+
+    fn save_state(&self, w: &mut rv_core::snapshot::Writer) {
+        let backend = self.backend.lock().unwrap();
+        w.u64(backend.size());
+        backend.save(w);
+    }
+
+    fn restore_state(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut backend = self.backend.lock().unwrap();
+        if r.u64()? != backend.size() {
+            return Err("a disk's size differs from the snapshot's".into());
+        }
+        backend.restore(r)
     }
 }
 

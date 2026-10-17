@@ -68,6 +68,38 @@ impl Plic {
         }
     }
 
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        let s = self.state.lock().unwrap();
+        for &p in &s.priority {
+            w.u32(p);
+        }
+        w.u128(s.level);
+        w.u128(s.pending);
+        w.u128(s.claimed);
+        for c in &s.contexts {
+            w.u128(c.enable);
+            w.u32(c.threshold);
+            w.bool(c.output);
+        }
+    }
+
+    /// Restores the PLIC; the harts' `mip` bits are restored with the harts.
+    pub fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        for p in &mut s.priority {
+            *p = r.u32()?;
+        }
+        s.level = r.u128()?;
+        s.pending = r.u128()?;
+        s.claimed = r.u128()?;
+        for c in &mut s.contexts {
+            c.enable = r.u128()?;
+            c.threshold = r.u32()?;
+            c.output = r.bool()?;
+        }
+        Ok(())
+    }
+
     /// Sets the level of interrupt line `source` (1-based).
     pub fn set_level(&self, source: u32, level: bool) {
         assert!((1..NUM_SOURCES as u32).contains(&source));

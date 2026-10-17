@@ -242,8 +242,13 @@ fn pump_loop(shared: &Shared) {
     loop {
         let (head, data, params, active) = {
             let mut s = shared.stream.lock().unwrap();
-            while !(s.running && !s.pending.is_empty() && s.params.is_some()) {
-                s = shared.work.wait(s).unwrap();
+            loop {
+                let frozen = s.active.as_ref().is_some_and(|a| a.mem.frozen());
+                if s.running && !s.pending.is_empty() && s.params.is_some() && !frozen {
+                    break;
+                }
+                // A snapshot freezes guest memory without notifying: look again shortly.
+                s = shared.work.wait_timeout(s, Duration::from_millis(20)).unwrap().0;
             }
             let (head, data) = s.pending.pop_front().unwrap();
             (head, data, s.params.unwrap(), s.active.clone())
@@ -367,6 +372,42 @@ impl VirtioDevice for Sound {
 
     fn pci_class(&self) -> u32 {
         0x04_01_00 // multimedia audio
+    }
+
+    fn save_state(&self, w: &mut rv_core::snapshot::Writer) {
+        let s = self.shared.stream.lock().unwrap();
+        match s.params {
+            Some(p) => {
+                w.bool(true);
+                w.u8(p.channels);
+                w.u8(p.format);
+                w.u32(p.rate);
+            }
+            None => w.bool(false),
+        }
+        w.bool(s.running);
+        w.u64(s.pending.len() as u64);
+        for (head, data) in &s.pending {
+            w.u16(*head);
+            w.bytes(data);
+        }
+    }
+
+    fn restore_state(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut s = self.shared.stream.lock().unwrap();
+        s.params = if r.bool()? {
+            Some(Params { channels: r.u8()?, format: r.u8()?, rate: r.u32()? })
+        } else {
+            None
+        };
+        s.running = r.bool()?;
+        s.pending.clear();
+        for _ in 0..r.u64()? {
+            let head = r.u16()?;
+            s.pending.push_back((head, r.bytes()?.to_vec()));
+        }
+        self.shared.work.notify_all();
+        Ok(())
     }
 }
 

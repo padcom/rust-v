@@ -81,6 +81,13 @@ pub trait PciDevice: Send + Sync {
     fn header(&self) -> PciHeader;
     fn bar_read(&self, bar: usize, offset: u64, size: u8) -> u64;
     fn bar_write(&self, bar: usize, offset: u64, size: u8, value: u64);
+
+    /// Device state for a snapshot (the configuration space is saved by the host bridge).
+    fn save(&self, _w: &mut rv_core::snapshot::Writer) {}
+
+    fn restore(&self, _r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        Ok(())
+    }
 }
 
 /// One INTx pin of one slot. Lines are shared between slots and wired-OR'ed.
@@ -270,6 +277,52 @@ impl PciHost {
     /// First free slot.
     pub fn free_slot(&self) -> Option<usize> {
         self.functions.lock().unwrap().iter().position(Option::is_none)
+    }
+
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        let functions = self.functions.lock().unwrap();
+        for f in functions.iter() {
+            match f {
+                Some(f) => {
+                    w.bool(true);
+                    w.bytes(&f.config[..]);
+                    f.device.save(w);
+                }
+                None => w.bool(false),
+            }
+        }
+        w.bytes(&self.intx.asserted.lock().unwrap().iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>());
+    }
+
+    pub fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut functions = self.functions.lock().unwrap();
+        for slot in 0..functions.len() {
+            let present = r.bool()?;
+            match (&mut functions[slot], present) {
+                (Some(f), true) => {
+                    let config = r.bytes()?;
+                    if config.len() != CONFIG_SIZE {
+                        return Err("bad PCI configuration in snapshot".into());
+                    }
+                    f.config.copy_from_slice(config);
+                    f.device.restore(r)?;
+                }
+                (None, false) => {}
+                _ => return Err("the snapshot's PCI devices differ from this machine's".into()),
+            }
+        }
+        let asserted = r.bytes()?;
+        let mut lines = self.intx.asserted.lock().unwrap();
+        for (i, v) in asserted.as_chunks::<4>().0.iter().enumerate().take(lines.len()) {
+            lines[i] = u32::from_le_bytes(*v);
+        }
+        drop(lines);
+        for slot in 0..functions.len() {
+            if let Some(f) = &functions[slot] {
+                self.remap(slot, f);
+            }
+        }
+        Ok(())
     }
 
     fn config_read(&self, offset: u64, size: u8) -> u64 {

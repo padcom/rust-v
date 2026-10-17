@@ -94,6 +94,12 @@ struct Args {
     /// Forward a host TCP port to a guest port, e.g. 2222:22 (repeatable).
     #[arg(long, value_name = "[HOST_ADDR:]HOST_PORT:GUEST_PORT", value_parser = parse_forward)]
     forward: Vec<(std::net::SocketAddr, u16)>,
+    /// Where Ctrl-A s saves a snapshot of the running machine.
+    #[arg(long, default_value = "rust-v.snapshot")]
+    snapshot_file: PathBuf,
+    /// Start from a snapshot (taken with the same options) instead of booting.
+    #[arg(long)]
+    restore: Option<PathBuf>,
     /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
     #[arg(long, value_name = "[HOST:]PORT")]
     gdb: Option<String>,
@@ -162,9 +168,14 @@ impl Drop for RawTerminal {
 
 const ESCAPE: u8 = 0x01; // Ctrl-A
 
-/// Forwards host stdin to the guest UART. In raw mode, Ctrl-A x quits and Ctrl-A Ctrl-A sends
-/// a literal Ctrl-A.
-fn spawn_console_input(uart: Arc<rv_machine::uart::Uart>, raw: bool) {
+/// Forwards host stdin to the guest UART. In raw mode, Ctrl-A x quits, Ctrl-A s saves a
+/// snapshot and Ctrl-A Ctrl-A sends a literal Ctrl-A.
+fn spawn_console_input(
+    uart: Arc<rv_machine::uart::Uart>,
+    raw: bool,
+    snapshots: rv_machine::snapshot::SnapshotHandle,
+    snapshot_file: PathBuf,
+) {
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
         let mut buf = [0u8; 256];
@@ -183,6 +194,19 @@ fn spawn_console_input(uart: Arc<rv_machine::uart::Uart>, raw: bool) {
                             let _ = crossterm::terminal::disable_raw_mode();
                             eprintln!("\r\nrust-v: terminated");
                             std::process::exit(0);
+                        }
+                        b's' | b'S' => {
+                            if snapshots.disks_written_through {
+                                eprint!(
+                                    "\r\nrust-v: note: disks written in place are not part of the snapshot\r\n"
+                                );
+                            }
+                            let (handle, path) = (snapshots.clone(), snapshot_file.clone());
+                            std::thread::spawn(move || {
+                                if let Err(e) = handle.save(&path) {
+                                    eprint!("\r\nrust-v: snapshot failed: {e}\r\n");
+                                }
+                            });
                         }
                         ESCAPE => out.push(ESCAPE),
                         _ => {}
@@ -318,9 +342,18 @@ fn run(args: Args) -> Result<Shutdown, String> {
     let interactive = std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };
     if interactive {
-        eprint!("rust-v: press Ctrl-A x to quit\r\n");
+        eprint!("rust-v: press Ctrl-A x to quit, Ctrl-A s to save a snapshot\r\n");
     }
-    spawn_console_input(machine.uart.clone(), interactive);
+    if let Some(path) = &args.restore {
+        machine.restore(path)?;
+        eprint!("rust-v: restored {}\r\n", path.display());
+    }
+    spawn_console_input(
+        machine.uart.clone(),
+        interactive,
+        machine.snapshot_handle(),
+        args.snapshot_file.clone(),
+    );
     let reason = match window {
         // The window's event loop must own the main thread (macOS requires it), so the
         // machine runs on another one.

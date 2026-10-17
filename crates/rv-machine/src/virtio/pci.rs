@@ -208,7 +208,55 @@ fn virtio_cap(cfg_type: u8, next: u8, offset: u64, length: u64, extra: &[u8]) ->
     cap
 }
 
+impl VirtioPci {
+    fn activation(&self, t: &Transport) -> Activation {
+        Activation {
+            features: t.driver_features,
+            queues: t.queues.clone(),
+            mem: self.mem.clone(),
+            irq: self.irq.clone(),
+        }
+    }
+}
+
 impl PciDevice for VirtioPci {
+    fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        let t = self.transport.lock().unwrap();
+        w.u32(t.device_feature_select);
+        w.u32(t.driver_feature_select);
+        w.u64(t.driver_features);
+        w.u8(t.status);
+        w.u16(t.queue_select);
+        w.u8(t.config_generation);
+        w.u8(self.irq.isr());
+        for q in &t.queues {
+            q.lock().unwrap().save(w);
+        }
+        t.device.save_state(w);
+    }
+
+    fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        let mut t = self.transport.lock().unwrap();
+        t.device.reset();
+        t.device_feature_select = r.u32()?;
+        t.driver_feature_select = r.u32()?;
+        t.driver_features = r.u64()?;
+        t.status = r.u8()?;
+        t.queue_select = r.u16()?;
+        t.config_generation = r.u8()?;
+        let isr = r.u8()?;
+        for q in &t.queues {
+            q.lock().unwrap().restore(r)?;
+        }
+        t.device.restore_state(r)?;
+        if t.status & status::DRIVER_OK != 0 {
+            let activation = self.activation(&t);
+            t.device.activate(activation);
+        }
+        self.irq.set_isr(isr);
+        Ok(())
+    }
+
     fn header(&self) -> PciHeader {
         let mut bars = [Bar::None; 6];
         bars[BAR] = Bar::Mem64 { size: BAR_SIZE, prefetchable: true };

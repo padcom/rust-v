@@ -204,3 +204,67 @@ fn boot(jit: bool, jit_cache_size: usize) {
 
     assert_eq!(runner.join().unwrap(), Shutdown::PowerOff);
 }
+
+/// A snapshot of a booted machine, restored into a new one, carries on where it was: the
+/// shell, its variables, the disk's in-memory changes.
+#[test]
+#[ignore = "needs scripts/build-guest-images.sh"]
+fn snapshot_and_restore() {
+    let config = || MachineConfig {
+        bios: image("fw_dynamic.bin"),
+        kernel: Some(image("Image")),
+        initrd: Some(image("initramfs.cpio")),
+        drives: vec![Drive {
+            backend: Box::new(rv_machine::virtio::blk::Overlay::new(Box::new(vec![0u8; 1 << 20]))),
+            read_only: false,
+        }],
+        // Every kind of device, so that all of their state goes through a snapshot.
+        net: Some(rv_machine::rv_net::Config::default()),
+        display: Some(rv_machine::display::Display::new(640, 480)),
+        sound: true,
+        shares: vec![rv_machine::Share {
+            path: std::env::temp_dir(),
+            tag: "tmp".into(),
+            read_only: true,
+            uid: 0,
+            gid: 0,
+        }],
+        ..MachineConfig::default()
+    };
+    let timeout = Duration::from_secs(120);
+    let path = std::env::temp_dir().join(format!("rust-v-test-{}.snapshot", std::process::id()));
+
+    let console = Capture::default();
+    let mut machine = Machine::new(config(), Box::new(console.clone())).unwrap();
+    let (uart, snapshots) = (machine.uart.clone(), machine.snapshot_handle());
+    let power = machine.power.clone();
+    let runner = std::thread::spawn(move || machine.run());
+    let mut pos = console.wait_for("# ", 0, timeout);
+    uart.push_input(
+        b"export MARK=$((40+2)); echo disk-$((1+1)) | dd of=/dev/vda conv=fsync 2>/dev/null; \
+          mkdir -p /mnt/t && mount -t 9p -o trans=virtio,version=9p2000.L tmp /mnt/t; echo ready-$((2*5))\n",
+    );
+    pos = console.wait_for("ready-10", pos, timeout);
+    snapshots.save(&path).unwrap();
+    // The machine keeps running after the snapshot.
+    uart.push_input(b"echo after-$((3*3))\n");
+    console.wait_for("after-9", pos, timeout);
+    power.request(Shutdown::PowerOff);
+    runner.join().unwrap();
+
+    let console = Capture::default();
+    let mut machine = Machine::new(config(), Box::new(console.clone())).unwrap();
+    machine.restore(&path).unwrap();
+    let uart = machine.uart.clone();
+    let runner = std::thread::spawn(move || machine.run());
+    uart.push_input(
+        b"echo mark=$MARK; head -c 6 /dev/vda; echo; ls /mnt/t > /dev/null && echo share-$((5+5))\n",
+    );
+    let pos = console.wait_for("mark=42", 0, timeout);
+    let pos = console.wait_for("disk-2", pos, timeout);
+    let pos = console.wait_for("share-10", pos, timeout);
+    uart.push_input(b"poweroff\n");
+    console.wait_for("reboot: Power down", pos, timeout);
+    assert_eq!(runner.join().unwrap(), Shutdown::PowerOff);
+    std::fs::remove_file(path).unwrap();
+}

@@ -24,6 +24,17 @@ pub struct GoldfishRtc {
     state: Mutex<State>,
 }
 
+impl GoldfishRtc {
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u64(self.state.lock().unwrap().offset as u64);
+    }
+
+    pub fn restore(&self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.state.lock().unwrap().offset = r.u64()? as i64;
+        Ok(())
+    }
+}
+
 fn host_ns() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
 }

@@ -170,6 +170,8 @@ struct Fid {
     /// Path relative to the shared root.
     path: PathBuf,
     file: Option<File>,
+    /// Flags the file was opened with (to reopen it after a snapshot is restored).
+    flags: Option<u32>,
     /// Directory listing taken at the first READDIR at offset 0.
     listing: Option<Vec<(String, Qid, u8)>>,
 }
@@ -250,7 +252,7 @@ impl P9 {
             msg::TATTACH => {
                 let fid = r.u32()?;
                 let meta = self.metadata(Path::new(""))?;
-                self.fids.insert(fid, Fid { path: PathBuf::new(), file: None, listing: None });
+                self.fids.insert(fid, Fid { path: PathBuf::new(), file: None, flags: None, listing: None });
                 w.qid(Self::qid(&meta, &self.root));
             }
             msg::TWALK => {
@@ -279,7 +281,7 @@ impl P9 {
                     }
                 }
                 if qids.len() == n as usize {
-                    self.fids.insert(newfid, Fid { path, file: None, listing: None });
+                    self.fids.insert(newfid, Fid { path, file: None, flags: None, listing: None });
                 }
                 w.u16(qids.len() as u16);
                 for q in qids {
@@ -300,6 +302,7 @@ impl P9 {
                     Some(open(&host, flags, false)?)
                 };
                 let f = self.fids.get_mut(&fid).unwrap();
+                f.flags = file.as_ref().map(|_| flags);
                 f.file = file;
                 f.listing = None;
                 w.qid(Self::qid(&meta, &host)).u32(0);
@@ -315,6 +318,7 @@ impl P9 {
                 let f = self.fids.get_mut(&fid).unwrap();
                 f.path = path;
                 f.file = Some(file);
+                f.flags = Some(flags & O_ACCMODE);
                 w.qid(Self::qid(&meta, &host)).u32(0);
             }
             msg::TREAD => {
@@ -700,6 +704,34 @@ impl VirtioDevice for P9 {
 
     fn pci_class(&self) -> u32 {
         0x00_02_00
+    }
+
+    fn save_state(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u64(self.fids.len() as u64);
+        for (&id, f) in &self.fids {
+            w.u32(id);
+            w.str(&f.path.to_string_lossy());
+            match f.flags {
+                Some(flags) => {
+                    w.bool(true);
+                    w.u32(flags);
+                }
+                None => w.bool(false),
+            }
+        }
+    }
+
+    fn restore_state(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.fids.clear();
+        for _ in 0..r.u64()? {
+            let id = r.u32()?;
+            let path = PathBuf::from(r.string()?);
+            let flags = if r.bool()? { Some(r.u32()?) } else { None };
+            // Reopen without creating or truncating; a file that went away stays closed.
+            let file = flags.and_then(|f| open(&self.host(&path), f & (O_ACCMODE | O_APPEND), false).ok());
+            self.fids.insert(id, Fid { path, file, flags, listing: None });
+        }
+        Ok(())
     }
 }
 

@@ -156,6 +156,31 @@ impl Queue {
         *self = Queue::new(self.max_size);
     }
 
+    pub fn save(&self, w: &mut rv_core::snapshot::Writer) {
+        w.u16(self.size);
+        w.bool(self.ready);
+        w.u64(self.desc);
+        w.u64(self.avail);
+        w.u64(self.used);
+        w.bool(self.event_idx);
+        w.u16(self.next_avail);
+        w.u16(self.next_used);
+        w.u16(self.signalled_used);
+    }
+
+    pub fn restore(&mut self, r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
+        self.size = r.u16()?.min(self.max_size);
+        self.ready = r.bool()?;
+        self.desc = r.u64()?;
+        self.avail = r.u64()?;
+        self.used = r.u64()?;
+        self.event_idx = r.bool()?;
+        self.next_avail = r.u16()?;
+        self.next_used = r.u16()?;
+        self.signalled_used = r.u16()?;
+        Ok(())
+    }
+
     fn avail_idx(&self, mem: &GuestMemory) -> Result<u16, DmaError> {
         let idx = mem.load(self.avail + 2, 2)? as u16;
         // Descriptors and ring entries the index covers are read after it.

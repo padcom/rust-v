@@ -21,6 +21,7 @@ struct Mmio {
 }
 
 pub struct Bus {
+    frozen: Arc<std::sync::atomic::AtomicBool>,
     ram: Arc<GuestRam>,
     ram_base: u64,
     mmio: Vec<Mmio>,
@@ -30,6 +31,7 @@ pub struct Bus {
 impl Bus {
     pub fn new(ram_base: u64, ram_size: u64) -> Self {
         Bus {
+            frozen: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ram: Arc::new(GuestRam::new(ram_size)),
             ram_base,
             mmio: Vec::new(),
@@ -40,7 +42,12 @@ impl Bus {
     /// A handle through which devices access RAM (DMA). It can be created before devices are
     /// added, so devices that need it can be mapped on this bus.
     pub fn memory(&self) -> GuestMemory {
-        GuestMemory { ram: self.ram.clone(), code: self.code.clone(), base: self.ram_base }
+        GuestMemory {
+            ram: self.ram.clone(),
+            code: self.code.clone(),
+            base: self.ram_base,
+            frozen: self.frozen.clone(),
+        }
     }
 
     /// Maps `device` at `[base, base + size)`. Panics on overlap with RAM or another device.
@@ -164,9 +171,20 @@ pub struct GuestMemory {
     ram: Arc<GuestRam>,
     code: Arc<CodePages>,
     base: u64,
+    frozen: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GuestMemory {
+    /// While frozen (a snapshot is being taken), devices working on their own threads hold
+    /// back work that would write guest memory.
+    pub fn set_frozen(&self, frozen: bool) {
+        self.frozen.store(frozen, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn offset(&self, addr: u64, len: u64) -> Result<u64, DmaError> {
         let off = addr.wrapping_sub(self.base);
         if off < self.ram.size() && len <= self.ram.size() - off {
