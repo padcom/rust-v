@@ -10,7 +10,9 @@
 
 mod cache;
 pub mod pool;
+mod vector;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -29,7 +31,8 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use rv_core::Priv;
 use rv_core::jit::{
-    BlockCompiler, BlockInfo, ChainSlot, Compiled, EXCEPTION, JitCode, JitEntry, abi, jit_load, jit_store,
+    BlockCompiler, BlockInfo, ChainSlot, Compiled, EXCEPTION, JitCode, JitEntry, Region, abi, jit_load,
+    jit_store,
 };
 use rv_core::mmu::Access;
 use rv_isa::{Insn, Op};
@@ -60,8 +63,7 @@ pub struct Compiler {
     block_sig: Signature,
     entry: JitEntry,
     /// Chain slots handed out to compiled code; they must live as long as the code.
-    #[allow(clippy::vec_box, reason = "generated code holds the slots' addresses, so they must not move")]
-    slots: Vec<Box<[ChainSlot; 2]>>,
+    slots: Vec<Box<[ChainSlot]>>,
     stats: Arc<Stats>,
     /// Debugging switches (environment variables `RV_JIT_NO_CHAIN`, `RV_JIT_NO_JUMP_CACHE`).
     chaining: bool,
@@ -310,8 +312,8 @@ impl BlockCompiler for Compiler {
         self.entry
     }
 
-    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
-        self.compile_now(insns, info)
+    fn compile(&mut self, region: &Arc<Region>, info: BlockInfo) -> Compiled {
+        self.compile_now(region, info)
     }
 
     fn reset(&mut self) {
@@ -326,13 +328,13 @@ impl BlockCompiler for Compiler {
 /// Native code for one block, not yet placed in a code cache.
 pub(crate) struct Generated {
     bytes: Vec<u8>,
-    /// The block's chain slots; the code holds their addresses.
-    slots: Box<[ChainSlot; 2]>,
+    /// The code's chain slots; the code holds their addresses.
+    slots: Box<[ChainSlot]>,
 }
 
 impl Compiler {
-    fn compile_now(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
-        let Some(generated) = self.generate(insns, info) else { return Compiled::Unsupported };
+    fn compile_now(&mut self, region: &Region, info: BlockInfo) -> Compiled {
+        let Some(generated) = self.generate(region, info) else { return Compiled::Unsupported };
         let Some(code) =
             self.cache.as_mut().expect("compiler without a code cache").install(&generated.bytes)
         else {
@@ -343,33 +345,43 @@ impl Compiler {
     }
 
     /// Translates (a prefix of) `insns`. `None` if not even the first instruction can be.
-    pub(crate) fn generate(&mut self, insns: &[Insn], info: BlockInfo) -> Option<Generated> {
+    pub(crate) fn generate(&mut self, region: &Region, info: BlockInfo) -> Option<Generated> {
         let data_priv = info.data_priv;
-        // Instructions the translator does not handle natively run through the interpreter
-        // helper, as long as they cannot change control flow, privilege or translation.
-        let mut count =
-            insns.iter().take_while(|i| supported(i.op) || rv_core::jit::executable_by_helper(i)).count();
-        // A final instruction that ends the block and has no native translation (a privileged
-        // one such as a CSR write, ECALL or SRET) also runs through the helper, after which
-        // the block returns to the dispatcher.
-        let helper_terminator = insns.get(count).is_some_and(|i| i.op != Op::Illegal && !supported(i.op));
-        if helper_terminator {
-            count += 1;
+        // Per guest block: the instructions to translate, and whether the last one runs through
+        // the helper as a terminator. Instructions the translator does not handle natively run
+        // through the interpreter helper, as long as they cannot change control flow, privilege
+        // or translation; a final privileged one (a CSR write, ECALL, SRET...) also does, after
+        // which the code returns to the dispatcher. Blocks other than the entry that cannot be
+        // translated at all are left out of the region.
+        let entry_offset = region.blocks[0].offset as i64;
+        let mut blocks: Vec<(i64, &[Insn], bool)> = Vec::new();
+        for (i, block) in region.blocks.iter().enumerate() {
+            let insns = &block.insns[..];
+            let mut count =
+                insns.iter().take_while(|i| supported(i.op) || rv_core::jit::executable_by_helper(i)).count();
+            let helper_terminator = insns.get(count).is_some_and(|i| i.op != Op::Illegal && !supported(i.op));
+            if helper_terminator {
+                count += 1;
+            }
+            if count == 0 {
+                if i == 0 {
+                    self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                    return None;
+                }
+                continue;
+            }
+            blocks.push((block.offset as i64 - entry_offset, &insns[..count], helper_terminator));
         }
-        if count == 0 {
-            self.stats.rejected.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-        let insns = &insns[..count];
         let start = Instant::now();
 
         self.ctx.clear();
         self.ctx.func = Function::with_name_signature(Default::default(), self.block_sig.clone());
-        let mut slots: Box<[ChainSlot; 2]> = Box::default();
+        // Each guest block has at most two static exits.
+        let mut slots: Box<[ChainSlot]> = (0..2 * blocks.len()).map(|_| ChainSlot::default()).collect();
         for slot in slots.iter_mut() {
             slot.page = info.page as u32;
         }
-        let slot_addr = [&slots[0] as *const ChainSlot as i64, &slots[1] as *const ChainSlot as i64];
+        let slot_addrs: Vec<i64> = slots.iter().map(|s| s as *const ChainSlot as i64).collect();
         let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
         let block_sig_ref = b.import_signature(self.block_sig.clone());
         let helper_sig_ref = b.import_signature(self.helper_sig.clone());
@@ -383,6 +395,9 @@ impl Compiler {
         let scratch = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
         let trusted = MemFlagsData::trusted();
         let guest = MemFlagsData::new().with_notrap();
+        let pending = b.declare_var(I64);
+        let targets: HashMap<i64, cranelift_codegen::ir::Block> =
+            blocks.iter().map(|&(off, ..)| (off, b.create_block())).collect();
 
         let mut t = Translator {
             regs: [Variable::from_u32(0); 32],
@@ -398,34 +413,51 @@ impl Compiler {
             pc0: state, // replaced below
             page_offset: (info.host & (rv_core::mem::PAGE_SIZE - 1)) as i64,
             vlenb: info.vlenb,
+            vconfig: None,
             dirty: 0,
             flushed: 0,
+            pending,
+            targets,
+            block_start: 0,
             block_sig_ref,
-            slot_addr,
+            slot_addrs,
+            next_slot: 0,
             page_generation: info.page_generation as i64,
             generation: info.generation,
             chaining: self.chaining,
             jump_cache: self.jump_cache,
         };
-        t.load_registers(insns);
+        let all: Vec<Insn> = blocks.iter().flat_map(|(_, insns, _)| insns.iter().copied()).collect();
+        t.load_registers(&all);
         t.pc0 = t.b.ins().load(I64, t.trusted, state, abi::PC as i32);
+        let zero = t.b.ins().iconst(I64, 0);
+        t.b.def_var(pending, zero);
+        let first = t.targets[&0];
+        t.b.ins().jump(first, &[]);
 
-        let mut offset = 0i64;
-        let mut ended = false;
-        for (i, insn) in insns.iter().enumerate() {
-            ended = if helper_terminator && i == insns.len() - 1 {
-                t.exec_via_helper(insn, i as u64, offset);
-                // The helper left the next pc (or a trap target) in the hart state.
-                let pc = t.b.ins().load(I64, t.trusted, t.state, abi::PC as i32);
-                t.exit(pc, i as u64 + 1, 0);
-                true
-            } else {
-                t.translate(insn, i as u64, offset)
-            };
-            offset += insn.len as i64;
-        }
-        if !ended {
-            t.static_exit(offset, insns.len() as u64, 0);
+        for &(block_offset, insns, helper_terminator) in &blocks {
+            let cl_block = t.targets[&block_offset];
+            t.b.switch_to_block(cl_block);
+            t.block_start = block_offset;
+            t.flushed = 0;
+            t.vconfig = None;
+            let mut offset = block_offset;
+            let mut ended = false;
+            for (i, insn) in insns.iter().enumerate() {
+                ended = if helper_terminator && i == insns.len() - 1 {
+                    t.exec_via_helper(insn, i as u64, offset);
+                    // The helper left the next pc (or a trap target) in the hart state.
+                    let pc = t.b.ins().load(I64, t.trusted, t.state, abi::PC as i32);
+                    t.exit(pc, i as u64 + 1, 0);
+                    true
+                } else {
+                    t.translate(insn, i as u64, offset)
+                };
+                offset += insn.len as i64;
+            }
+            if !ended {
+                t.static_exit(offset, insns.len() as u64);
+            }
         }
         t.b.seal_all_blocks();
         t.b.finalize(self.isa.frontend_config());
@@ -439,7 +471,7 @@ impl Compiler {
         };
 
         self.stats.blocks.fetch_add(1, Ordering::Relaxed);
-        self.stats.instructions.fetch_add(insns.len() as u64, Ordering::Relaxed);
+        self.stats.instructions.fetch_add(all.len() as u64, Ordering::Relaxed);
         self.stats.nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
         Some(Generated { bytes, slots })
     }
@@ -457,21 +489,31 @@ struct Translator<'a> {
     /// Flags for accesses to guest memory (possibly misaligned, never trap).
     guest: MemFlagsData,
     data_priv: Priv,
-    /// Guest `pc` of the first instruction.
+    /// Guest `pc` of the region's entry. Offsets below are relative to it.
     pc0: Value,
-    /// Offset of the first instruction within its page.
+    /// Offset of the entry within its page.
     page_offset: i64,
     /// Vector register length in bytes.
     vlenb: u32,
+    /// Vector configuration set by a native VSETVLI earlier in the current guest block.
+    vconfig: Option<vector::Vconfig>,
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
-    /// Instructions of this block already added to the retired count (before helper calls,
-    /// so that the interpreter sees exact counters).
+    /// Instructions of the current guest block already added to the retired count (before
+    /// helper calls, so that the interpreter sees exact counters).
     flushed: u64,
+    /// Instructions retired since the last flush, at the start of the current guest block
+    /// (blocks of a region are entered from different paths, so this is a runtime value).
+    pending: Variable,
+    /// The region's guest blocks, by byte offset from the entry.
+    targets: HashMap<i64, cranelift_codegen::ir::Block>,
+    /// Offset of the current guest block; edges to it or earlier ones are back-edges.
+    block_start: i64,
     block_sig_ref: SigRef,
-    /// Addresses of this block's two chain slots.
-    slot_addr: [i64; 2],
+    /// Addresses of the function's chain slots, handed out by `next_slot`.
+    slot_addrs: Vec<i64>,
+    next_slot: usize,
     /// Address of the page's code generation and the generation the block was decoded at.
     page_generation: i64,
     generation: u32,
@@ -484,11 +526,13 @@ const fn reg_offset(r: u8) -> i32 {
 }
 
 impl Translator<'_> {
-    /// Declares a variable per register and loads those the block reads.
+    /// Declares a variable per register and loads those the region reads or writes. Every
+    /// register written somewhere counts as dirty on every exit: the region's paths differ.
     fn load_registers(&mut self, insns: &[Insn]) {
         let mut used = 0u32;
         for i in insns {
-            used |= (1 << i.rs1) | (1 << i.rs2);
+            used |= (1 << i.rs1) | (1 << i.rs2) | (1 << i.rd);
+            self.dirty |= (1 << i.rd) & !1;
         }
         for r in 1..32u8 {
             self.regs[r as usize] = self.b.declare_var(I64);
@@ -519,16 +563,65 @@ impl Translator<'_> {
             }
         }
         self.b.ins().store(self.trusted, pc, self.state, abi::PC as i32);
-        self.add_retired(retired - self.flushed);
+        let n = self.retired_value(retired);
+        self.add_retired(n);
     }
 
-    fn add_retired(&mut self, n: u64) {
-        if n == 0 {
+    /// Instructions retired since the last flush, once the first `retired` instructions of
+    /// the current guest block have executed.
+    fn retired_value(&mut self, retired: u64) -> Value {
+        let pending = self.b.use_var(self.pending);
+        self.b.ins().iadd_imm_s(pending, (retired - self.flushed) as i64)
+    }
+
+    fn add_retired(&mut self, n: Value) {
+        let total = self.b.ins().load(I64, self.trusted, self.state, abi::JIT_RETIRED as i32);
+        let total = self.b.ins().iadd(total, n);
+        self.b.ins().store(self.trusted, total, self.state, abi::JIT_RETIRED as i32);
+    }
+
+    fn next_slot(&mut self) -> i64 {
+        let slot = self.slot_addrs[self.next_slot];
+        self.next_slot += 1;
+        slot
+    }
+
+    /// Continues at another block of the region after the first `retired` instructions of the
+    /// current one. Back-edges (to this block or an earlier one) charge the budget and check
+    /// for requests to stop, so that loops inside a region cannot run forever.
+    fn internal_jump(&mut self, offset: i64, retired: u64, target: cranelift_codegen::ir::Block) {
+        let n = self.retired_value(retired);
+        if offset > self.block_start {
+            self.b.def_var(self.pending, n);
+            self.b.ins().jump(target, &[]);
             return;
         }
-        let total = self.b.ins().load(I64, self.trusted, self.state, abi::JIT_RETIRED as i32);
-        let total = self.b.ins().iadd_imm_s(total, n as i64);
-        self.b.ins().store(self.trusted, total, self.state, abi::JIT_RETIRED as i32);
+        let t = self.trusted;
+        self.add_retired(n);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.def_var(self.pending, zero);
+        let budget = self.b.ins().load(I64, t, self.state, abi::JIT_BUDGET as i32);
+        let budget = self.b.ins().isub(budget, n);
+        self.b.ins().store(t, budget, self.state, abi::JIT_BUDGET as i32);
+        let (check_request, stop) = (self.b.create_block(), self.b.create_block());
+        let left = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, budget, 0);
+        self.b.ins().brif(left, check_request, &[], stop, &[]);
+        self.b.switch_to_block(check_request);
+        let request_ptr = self.b.ins().load(I64, t, self.state, abi::JIT_EXIT_REQUEST as i32);
+        let request = self.b.ins().load(I32, MemFlagsData::new().with_notrap(), request_ptr, 0);
+        self.b.ins().brif(request, stop, &[], target, &[]);
+        // Out of budget or asked to stop: leave at the target, already counted.
+        self.b.switch_to_block(stop);
+        let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
+        for r in 1..32u8 {
+            if self.dirty & (1 << r) != 0 {
+                let v = self.b.use_var(self.regs[r as usize]);
+                self.b.ins().store(t, v, self.state, reg_offset(r));
+            }
+        }
+        self.b.ins().store(t, pc, self.state, abi::PC as i32);
+        self.b.ins().store(t, zero, self.state, abi::JIT_CHAIN_FROM as i32);
+        self.b.ins().return_(&[zero]);
     }
 
     /// Leaves the block for the dispatcher without a chain slot (indirect jumps, exceptions).
@@ -540,21 +633,26 @@ impl Translator<'_> {
         self.b.ins().return_(&[status]);
     }
 
-    /// Leaves the block for a static successor: tail-calls it if chain slot `slot` is linked
+    /// Leaves the block for a static successor: tail-calls it if a fresh chain slot is linked
     /// and still valid, otherwise returns to the dispatcher (which may link the slot).
-    fn chain_exit(&mut self, pc: Value, retired: u64, slot: usize) {
-        let slot_addr = self.b.ins().iconst(I64, self.slot_addr[slot]);
+    fn chain_exit(&mut self, pc: Value, retired: u64) {
+        let slot = self.next_slot();
+        let slot_addr = self.b.ins().iconst(I64, slot);
         self.chain_exit_via(pc, retired, slot_addr);
     }
 
-    /// Leaves the block for the successor at byte `offset` from its start. Successors in the
-    /// same page are chained; the virtual-to-physical mapping of any other page may differ
-    /// between the address spaces sharing this code, so those go through the fetch TLB and
-    /// the jump cache like indirect jumps.
-    fn static_exit(&mut self, offset: i64, retired: u64, slot: usize) {
+    /// Continues at the successor at byte `offset` from the region's entry, after the first
+    /// `retired` instructions of the current block. Successors in the region are jumped to;
+    /// others in the same page are chained; the virtual-to-physical mapping of any other page
+    /// may differ between the address spaces sharing this code, so those go through the
+    /// fetch TLB and the jump cache like indirect jumps.
+    fn static_exit(&mut self, offset: i64, retired: u64) {
+        if let Some(&target) = self.targets.get(&offset) {
+            return self.internal_jump(offset, retired, target);
+        }
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         if self.same_page(offset) {
-            self.chain_exit(pc, retired, slot);
+            self.chain_exit(pc, retired);
         } else {
             self.indirect_exit(pc, retired);
         }
@@ -608,8 +706,9 @@ impl Translator<'_> {
         let t = self.trusted;
         let check_request = self.b.create_block();
         let go = self.b.create_block();
+        let n = self.retired_value(retired);
         let budget = self.b.ins().load(I64, t, self.state, abi::JIT_BUDGET as i32);
-        let budget = self.b.ins().iadd_imm_s(budget, -(retired as i64));
+        let budget = self.b.ins().isub(budget, n);
         self.b.ins().store(t, budget, self.state, abi::JIT_BUDGET as i32);
         let left = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, budget, 0);
         self.b.ins().brif(left, check_request, &[], ret, &[]);
@@ -699,11 +798,16 @@ impl Translator<'_> {
                 self.b.ins().store(t, v, self.state, reg_offset(r));
             }
         }
-        // The cached values now match HartState.
-        self.dirty = 0;
         // Counters read or written by the helper must include the instructions before it.
-        self.add_retired(index - self.flushed);
-        self.flushed = index;
+        // `pending` then counts from this instruction on; making it negative (rather than
+        // changing `flushed`) keeps the count right when this is only one arm of a branch.
+        let n = self.retired_value(index);
+        self.add_retired(n);
+        let rebase = self.b.ins().iconst(I64, -((index - self.flushed) as i64));
+        self.b.def_var(self.pending, rebase);
+        if matches!(insn.op, Op::Vsetvli | Op::Vsetivli | Op::Vsetvl) {
+            self.vconfig = None;
+        }
         let pc = self.b.ins().iadd_imm_s(self.pc0, offset);
         self.b.ins().store(t, pc, self.state, abi::PC as i32);
         // SAFETY: `Insn` is plain data of exactly 16 bytes.
@@ -724,6 +828,18 @@ impl Translator<'_> {
             let v = self.b.ins().load(I64, t, self.state, reg_offset(insn.rd));
             self.b.def_var(self.regs[insn.rd as usize], v);
         }
+    }
+
+    /// [`exec_via_helper`](Self::exec_via_helper) on a slow path that continues at `done`.
+    fn exec_via_helper_branch(
+        &mut self,
+        insn: &Insn,
+        index: u64,
+        offset: i64,
+        done: cranelift_codegen::ir::Block,
+    ) {
+        self.exec_via_helper(insn, index, offset);
+        self.b.ins().jump(done, &[]);
     }
 
     /// VSETVLI/VSETIVLI with a valid immediate `vtype` (so a known VLMAX).
@@ -767,6 +883,7 @@ impl Translator<'_> {
         let dirty = self.b.ins().bor_imm_s(mstatus, vs);
         self.b.ins().store(t, dirty, self.state, abi::MSTATUS as i32);
         self.set(insn.rd, vl);
+        self.vconfig = Some(vector::Vconfig::from_vtype(vtype));
     }
 
     fn zext32(&mut self, v: Value) -> Value {
@@ -1019,7 +1136,7 @@ impl Translator<'_> {
             Op::Jal => {
                 let link = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 self.set(rd, link);
-                self.static_exit(offset + imm, retired, 0);
+                self.static_exit(offset + imm, retired);
                 return true;
             }
             Op::Jalr => {
@@ -1043,21 +1160,27 @@ impl Translator<'_> {
                 let a = self.get(insn.rs1);
                 let b = self.get(insn.rs2);
                 let taken = self.b.ins().icmp(cc, a, b);
-                if !self.same_page(offset + imm) || !self.same_page(offset + len) {
+                let in_region = |o: i64| self.targets.contains_key(&o);
+                if !self.same_page(offset + imm)
+                    || !self.same_page(offset + len)
+                    || in_region(offset + imm)
+                    || in_region(offset + len)
+                {
                     let (on_taken, on_fall) = (self.b.create_block(), self.b.create_block());
                     self.b.ins().brif(taken, on_taken, &[], on_fall, &[]);
                     self.b.switch_to_block(on_taken);
-                    self.static_exit(offset + imm, retired, 0);
+                    self.static_exit(offset + imm, retired);
                     self.b.switch_to_block(on_fall);
-                    self.static_exit(offset + len, retired, 1);
+                    self.static_exit(offset + len, retired);
                     return true;
                 }
                 // Select the successor and its chain slot, then share one exit sequence.
                 let target = self.b.ins().iadd_imm_s(self.pc0, offset + imm);
                 let fall = self.b.ins().iadd_imm_s(self.pc0, offset + len);
                 let next = self.b.ins().select(taken, target, fall);
-                let slot_taken = self.b.ins().iconst(I64, self.slot_addr[0]);
-                let slot_fall = self.b.ins().iconst(I64, self.slot_addr[1]);
+                let (taken_slot, fall_slot) = (self.next_slot(), self.next_slot());
+                let slot_taken = self.b.ins().iconst(I64, taken_slot);
+                let slot_fall = self.b.ins().iconst(I64, fall_slot);
                 let slot = self.b.ins().select(taken, slot_taken, slot_fall);
                 self.chain_exit_via(next, retired, slot);
                 return true;
@@ -1298,6 +1421,7 @@ impl Translator<'_> {
                     None => self.exec_via_helper(insn, index, offset),
                 }
             }
+            Op::Vop | Op::Vload | Op::Vstore if self.translate_vector(insn, index, offset) => {}
             _ => self.exec_via_helper(insn, index, offset),
         }
         false

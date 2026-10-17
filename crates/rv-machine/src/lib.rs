@@ -343,8 +343,9 @@ impl Machine {
             let pool = if config.jit_background {
                 let cores = std::thread::available_parallelism().map_or(4, |n| n.get());
                 let workers = num_harts.min(cores.saturating_sub(num_harts)).max(1);
-                let pool = rv_jit::pool::JitPool::new(num_harts, workers, config.jit_cache_size)
-                    .map_err(Error::Jit)?;
+                // One cache as big as the per-hart caches together (virtual memory until used).
+                let cache_size = config.jit_cache_size.saturating_mul(num_harts);
+                let pool = rv_jit::pool::JitPool::new(num_harts, workers, cache_size).map_err(Error::Jit)?;
                 jit_stats = Some(vec![pool.stats()]);
                 Some(pool)
             } else {

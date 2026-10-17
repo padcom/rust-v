@@ -132,9 +132,12 @@ pub enum Compiled {
     CacheFull,
 }
 
+pub use crate::block::{Region, RegionBlock};
+
 pub trait BlockCompiler: Send {
-    /// Compiles `insns` (or a prefix of them), now or in the background.
-    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled;
+    /// Compiles `region` (or part of it: at least a prefix of its entry block), now or in the
+    /// background.
+    fn compile(&mut self, region: &std::sync::Arc<Region>, info: BlockInfo) -> Compiled;
 
     /// A finished background compilation: the request's `info` and its result (never
     /// `Pending`).
@@ -177,6 +180,7 @@ pub mod abi {
 
     pub const X: usize = offset_of!(HartState, x);
     pub const PC: usize = offset_of!(HartState, pc);
+    pub const V: usize = offset_of!(HartState, v);
     pub const MSTATUS: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, mstatus);
     pub const VL: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vl);
     pub const VTYPE: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vtype);

@@ -68,6 +68,31 @@ Devices and networking options:
 The virtual network matches QEMU's: the guest is 10.0.2.15, the gateway 10.0.2.2 (which
 reaches the host's loopback interface) and the DNS server 10.0.2.3.
 
+## Running Ubuntu Desktop
+
+The official Ubuntu RISC-V desktop live ISO boots the same way, with a display:
+
+```sh
+scripts/fetch-ubuntu.sh desktop   # third_party/ubuntu/ubuntu-26.10-desktop-riscv64.iso
+
+G=third_party/guest
+target/release/rust-v --bios $G/fw_dynamic.bin --kernel $G/u-boot.bin -m 8G \
+  --disk third_party/ubuntu/ubuntu-26.10-desktop-riscv64.iso,ro --display window
+```
+
+The window shows the guest's virtio-gpu output scaled to fit; keyboard and mouse go to the
+guest through virtio-input (the mouse is an absolute tablet, so it needs no grabbing), and
+sound plays through the host's default output. GNOME renders with llvmpipe, so the first boot
+of the live session takes several minutes. `scripts/desktop-smoke.py` boots the ISO headless
+with a serial console added and takes screenshots.
+
+| Option | Meaning |
+|---|---|
+| `--display window\|headless\|none` | desktop window; devices without a window; serial only (default) |
+| `--resolution 1920x1080` | initial display size (the guest is offered the window size after resizing) |
+| `--screenshot shot.png` | save the display every two seconds while it changes |
+| `--no-sound` | no sound card (one comes with a display) |
+
 ## Testing
 
 ```sh

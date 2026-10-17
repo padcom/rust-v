@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 
 use rv_isa::{Insn, Op, decode};
 
-use crate::block::{Block, decode_block};
+use crate::block::{Block, RegionBlock, decode_block, decode_region};
 use crate::csr::status;
 use crate::hart::{Hart, Priv, Reservation};
 use crate::jit::{BlockInfo, ChainSlot, Compiled, Enter, JitCode, JumpCacheEntry, jump_cache_index};
@@ -138,6 +138,9 @@ impl Hart {
                 self.blocks.block_mut(idx).fence_epoch = self.state.jit.fence_epoch;
                 return Ok(Some(idx));
             }
+            // Stale: make everything cached for this page stale everywhere (other harts and
+            // the shared compiled-code table key their copies by the page generation).
+            self.bus.code().invalidate_page(page);
         }
         // Mark the page before reading its generation and contents, so that any write from
         // here on is detected.
@@ -197,7 +200,12 @@ impl Hart {
         let insns = b.insns.clone();
         let generation = b.generation;
         let host = self.blocks.host(block);
+        let entry = RegionBlock { offset: (host as u64 & (PAGE_SIZE - 1)) as u16, insns };
         let page = self.bus.ram_page_of(host);
+        let page_host = (host as usize & !(PAGE_SIZE as usize - 1)) as *const u8;
+        // SAFETY: the block was decoded from this page of guest RAM.
+        let region = std::sync::Arc::new(unsafe { decode_region(page_host, entry) });
+        self.blocks.block_mut(block).region = Some(region.clone());
         let info = BlockInfo {
             host: host as u64,
             data_priv,
@@ -207,7 +215,7 @@ impl Hart {
             cache_epoch: self.jit_cache_epoch,
             vlenb: self.vlenb() as u32,
         };
-        let result = self.compiler.as_mut().unwrap().compile(&insns, info);
+        let result = self.compiler.as_mut().unwrap().compile(&region, info);
         let b = self.blocks.block_mut(block);
         match result {
             Compiled::Code(code) => {
@@ -234,6 +242,7 @@ impl Hart {
     fn flush_jit(&mut self) {
         for b in self.blocks.blocks_mut() {
             b.jit = None;
+            b.region = None;
             b.jit_pending = false;
             b.jit_failed = false;
             b.hits = 0;

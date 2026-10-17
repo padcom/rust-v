@@ -69,6 +69,11 @@ impl CodePages {
         }
     }
 
+    /// Treats `page` as written: everything cached for it becomes stale, on every hart.
+    pub fn invalidate_page(&self, page: usize) {
+        self.invalidate(page);
+    }
+
     #[cold]
     fn invalidate(&self, page: usize) {
         self.bits[page / 64].fetch_and(!(1 << (page % 64)), Ordering::SeqCst);

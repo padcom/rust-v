@@ -13,8 +13,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use rv_core::jit::{BlockCompiler, BlockInfo, ChainSlot, Compiled, Enter, JitCode, JitEntry};
-use rv_isa::Insn;
+use rv_core::jit::{BlockCompiler, BlockInfo, ChainSlot, Compiled, Enter, JitCode, JitEntry, Region};
 
 use crate::cache::CodeCache;
 use crate::{Compiler, Stats};
@@ -32,7 +31,7 @@ enum Entry {
 type Key = (u64, u8);
 
 struct Job {
-    insns: Box<[Insn]>,
+    region: Arc<Region>,
     info: BlockInfo,
     /// Cache generation the job was queued in.
     cache_generation: u32,
@@ -40,8 +39,8 @@ struct Job {
 
 struct Installed {
     cache: CodeCache,
-    #[allow(clippy::vec_box, reason = "generated code holds the slots' addresses, so they must not move")]
-    slots: Vec<Box<[ChainSlot; 2]>>,
+    /// Chain slots of the installed code; it holds their addresses.
+    slots: Vec<Box<[ChainSlot]>>,
 }
 
 #[repr(align(128))]
@@ -140,7 +139,7 @@ impl JitPool {
             if job.cache_generation != self.generation.load(Ordering::Acquire) {
                 continue; // queued before the cache was emptied: nobody waits for it any more
             }
-            let generated = compiler.generate(&job.insns, job.info);
+            let generated = compiler.generate(&job.region, job.info);
             let mut installed = self.installed.lock().unwrap();
             let code = match generated {
                 None => None,
@@ -201,7 +200,7 @@ pub struct PoolHandle {
 }
 
 impl BlockCompiler for PoolHandle {
-    fn compile(&mut self, insns: &[Insn], info: BlockInfo) -> Compiled {
+    fn compile(&mut self, region: &Arc<Region>, info: BlockInfo) -> Compiled {
         let key = (info.host, info.data_priv as u8);
         let mut shard = self.pool.shard(key).lock().unwrap();
         match shard.get(&key) {
@@ -212,7 +211,7 @@ impl BlockCompiler for PoolHandle {
             _ => {
                 shard.insert(key, Entry::Pending(info.generation));
                 drop(shard);
-                let job = Job { insns: insns.into(), info, cache_generation: self.synced };
+                let job = Job { region: region.clone(), info, cache_generation: self.synced };
                 self.pool.jobs.lock().unwrap().push_back(job);
                 self.pool.work.notify_one();
             }

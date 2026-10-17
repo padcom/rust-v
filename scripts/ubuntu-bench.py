@@ -24,7 +24,7 @@ g.send("cat > /tmp/bench.sh <<'RUSTV_EOF'\n" + script + "RUSTV_EOF\n")
 g.run("bash /tmp/bench.sh 2>&1 | tee /tmp/bench.out", timeout=1800)
 with g.lock:
     text = g.out.decode(errors="replace")
-for name, secs in re.findall(r"^bench (\w+) ([0-9.]+)", text, re.M):
+for name, secs in re.findall(r"bench (\w+) (\d+\.\d+)", text):
     print(f"{name:8} {float(secs):8.2f} s")
 g.send("sudo poweroff\n")
 m = g.wait(r"(\[sudo\] password for ubuntu: |reboot: Power down)")
