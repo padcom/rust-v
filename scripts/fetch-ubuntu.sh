@@ -3,7 +3,9 @@
 #
 #   scripts/fetch-ubuntu.sh            preinstalled server image, unpacked into
 #                                      third_party/ubuntu/ubuntu-<release>-server-riscv64.img and
-#                                      grown to $DISK_SIZE (cloud-init grows the root partition)
+#                                      grown to $DISK_SIZE (cloud-init grows the root partition),
+#                                      plus an identical ...-pristine.img that the smoke and
+#                                      benchmark scripts boot (with writes kept in memory)
 #   scripts/fetch-ubuntu.sh desktop    desktop live ISO,
 #                                      third_party/ubuntu/ubuntu-<release>-desktop-riscv64.iso
 set -euo pipefail
@@ -45,5 +47,8 @@ size = int(s[:-1]) << units[s[-1]] if s[-1] in units else int(s)
 if os.path.getsize(sys.argv[1]) < size:
     os.truncate(sys.argv[1], size)
 PY
+PRISTINE="ubuntu-$RELEASE-server-riscv64-pristine.img"
+# A copy-on-write clone where the file system supports it, a sparse copy otherwise.
+cp -c "$IMG.tmp" "$PRISTINE" 2>/dev/null || cp --sparse=always "$IMG.tmp" "$PRISTINE" 2>/dev/null || cp "$IMG.tmp" "$PRISTINE"
 mv "$IMG.tmp" "$IMG"
 echo "$OUT/$IMG"

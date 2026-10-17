@@ -31,3 +31,15 @@ fn chaining_does_not_skip_page_straddling_instructions() {
         );
     }
 }
+
+/// `lazyvec.S`: VSETVLI with the vector unit off must trap from compiled code as well.
+#[test]
+fn vsetvli_traps_when_the_vector_unit_is_off() {
+    for threshold in [1, 2, 16] {
+        assert_eq!(
+            run(include_bytes!("lazyvec.bin"), threshold),
+            Shutdown::PowerOff,
+            "threshold {threshold}"
+        );
+    }
+}

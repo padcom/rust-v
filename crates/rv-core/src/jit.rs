@@ -111,6 +111,8 @@ pub struct BlockInfo {
     pub page: usize,
     /// Code cache epoch the request was made in; results from an older epoch are stale.
     pub cache_epoch: u32,
+    /// Vector register length in bytes.
+    pub vlenb: u32,
 }
 
 // SAFETY: the generation pointer refers to the bus, which outlives every hart and compiler.
@@ -175,6 +177,10 @@ pub mod abi {
 
     pub const X: usize = offset_of!(HartState, x);
     pub const PC: usize = offset_of!(HartState, pc);
+    pub const MSTATUS: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, mstatus);
+    pub const VL: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vl);
+    pub const VTYPE: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vtype);
+    pub const VSTART: usize = offset_of!(HartState, csr) + offset_of!(crate::hart::Csrs, vstart);
     pub const TLB: usize = offset_of!(HartState, tlb) + offset_of!(Tlb, entries);
     pub const TLB_ENTRY_SIZE: usize = size_of::<TlbEntry>();
     pub const TLB_TAG: usize = offset_of!(TlbEntry, tag);
@@ -256,6 +262,18 @@ pub unsafe extern "C" fn jit_exec(hart: *mut Hart, lo: u64, hi: u64) -> u64 {
             1
         }
     }
+}
+
+/// Raises an illegal-instruction exception for the instruction with encoding `raw`, for
+/// compiled code that found the instruction's unit disabled. Always returns 1.
+///
+/// # Safety
+/// `hart` must be the hart executing the block.
+pub unsafe extern "C" fn jit_illegal(hart: *mut Hart, raw: u64, _unused: u64) -> u64 {
+    // SAFETY: by contract.
+    let hart = unsafe { &mut *hart };
+    hart.jit_exception = Some(Exception::illegal(raw as u32));
+    1
 }
 
 /// Slow-path store for generated code. Returns 0 on success.

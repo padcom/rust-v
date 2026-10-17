@@ -32,6 +32,14 @@ pub(crate) struct Vtype {
 pub(crate) const VTYPE_VILL: u64 = 1 << 63;
 
 /// Validates a `vtype` value as written by `vsetvl{i}`. `None` if it would set `vill`.
+/// VLMAX for a `vtype` value with `vlenb`-byte registers, or `None` if the value sets
+/// `vill`. Lets compiled code execute VSETVLI/VSETIVLI with an immediate `vtype` natively.
+pub fn vlmax_for(vtype: u64, vlenb: usize) -> Option<u64> {
+    let vt = decode_vtype(vtype)?;
+    let base = vlenb / vt.sew;
+    Some(if vt.lmul >= 0 { base << vt.lmul } else { base >> -vt.lmul } as u64)
+}
+
 fn decode_vtype(value: u64) -> Option<Vtype> {
     // Only vma, vta, vsew and vlmul may be set.
     if value >> 8 != 0 {
@@ -142,6 +150,7 @@ impl Hart {
         if !self.vector_enabled() {
             return Err(Exception::illegal(insn.raw));
         }
+        profile::count(insn);
         match insn.op {
             Op::Vsetvli | Op::Vsetivli | Op::Vsetvl => self.exec_vset(insn),
             Op::Vload | Op::Vstore => self.exec_vmem(insn)?,
@@ -200,4 +209,72 @@ pub(crate) const fn mask(sew: usize) -> u64 {
 pub(crate) const fn sext(v: u64, sew: usize) -> i64 {
     let shift = 64 - 8 * sew as u32;
     ((v << shift) as i64) >> shift
+}
+
+/// Counts of executed vector instructions by kind, collected when `RV_VECTOR_PROFILE` is set
+/// (to see which ones deserve native code).
+pub mod profile {
+    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    use rv_isa::{Insn, Op};
+
+    /// Arithmetic (by funct3 and funct6), then loads and stores (by mop and width), then vset*.
+    const KINDS: usize = 8 * 64 + 2 * 4 * 8 + 1;
+
+    struct Profile {
+        counts: Box<[AtomicU64]>,
+        examples: Box<[AtomicU32]>,
+    }
+
+    fn profile() -> Option<&'static Profile> {
+        static PROFILE: OnceLock<Option<Profile>> = OnceLock::new();
+        PROFILE
+            .get_or_init(|| {
+                std::env::var_os("RV_VECTOR_PROFILE").map(|_| Profile {
+                    counts: (0..KINDS).map(|_| AtomicU64::new(0)).collect(),
+                    examples: (0..KINDS).map(|_| AtomicU32::new(0)).collect(),
+                })
+            })
+            .as_ref()
+    }
+
+    fn kind(insn: &Insn) -> usize {
+        let raw = insn.raw;
+        match insn.op {
+            Op::Vload | Op::Vstore => {
+                let store = (insn.op == Op::Vstore) as usize;
+                let mop = ((raw >> 26) & 3) as usize;
+                8 * 64 + store * 32 + mop * 8 + ((raw >> 12) & 7) as usize
+            }
+            Op::Vsetvli | Op::Vsetivli | Op::Vsetvl => KINDS - 1,
+            _ => ((raw >> 12) & 7) as usize * 64 + (raw >> 26) as usize,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn count(insn: &Insn) {
+        if let Some(p) = profile() {
+            let k = kind(insn);
+            p.counts[k].fetch_add(1, Ordering::Relaxed);
+            p.examples[k].store(insn.raw, Ordering::Relaxed);
+        }
+    }
+
+    /// The most executed kinds, with an example instruction of each.
+    pub fn report(top: usize) -> Option<String> {
+        let p = profile()?;
+        let mut rows: Vec<(u64, u32)> = (0..KINDS)
+            .map(|k| (p.counts[k].load(Ordering::Relaxed), p.examples[k].load(Ordering::Relaxed)))
+            .filter(|&(n, _)| n > 0)
+            .collect();
+        rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let total: u64 = rows.iter().map(|r| r.0).sum();
+        let mut out = format!("vector instructions: {total}\n");
+        for (n, raw) in rows.into_iter().take(top) {
+            out +=
+                &format!("{:6.2}% {n:12}  e.g. {}\n", n as f64 * 100.0 / total as f64, rv_isa::decode(raw));
+        }
+        Some(out)
+    }
 }

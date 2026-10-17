@@ -13,7 +13,8 @@ UBUNTU = os.path.join(ROOT, "third_party", "ubuntu")
 
 class Guest:
     def __init__(self, args, log):
-        cmd = [os.path.join(ROOT, "target", "release", "rust-v"),
+        binary = os.environ.get("RUST_V_BIN", os.path.join(ROOT, "target", "release", "rust-v"))
+        cmd = [binary,
                "--bios", os.path.join(GUEST, "fw_dynamic.bin"),
                "--kernel", os.path.join(GUEST, "u-boot.bin")] + args
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -36,15 +37,16 @@ class Guest:
             self.log.write(b)
             self.log.flush()
 
-    def wait(self, pattern, timeout=600):
-        """Waits for regex `pattern` in the console output after the last match."""
+    def wait(self, pattern, timeout=600, anywhere=False):
+        """Waits for regex `pattern` in the console output after the last match (or, with
+        `anywhere`, at any point so far)."""
         deadline = time.monotonic() + timeout
         rx = re.compile(pattern.encode())
         while time.monotonic() < deadline:
             with self.lock:
-                m = rx.search(self.out, self.pos)
+                m = rx.search(self.out, 0 if anywhere else self.pos)
             if m:
-                self.pos = m.end()
+                self.pos = max(self.pos, m.end())
                 return m
             if self.proc.poll() is not None:
                 break

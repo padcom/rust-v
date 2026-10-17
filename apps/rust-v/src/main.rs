@@ -317,6 +317,9 @@ fn run(args: Args) -> Result<Shutdown, String> {
             machine.stats.idle.as_secs_f64(),
             insns as f64 / busy / 1e6
         );
+        if let Some(report) = rv_machine::vector_profile_report(30) {
+            eprint!("{}", report.replace('\n', "\r\n"));
+        }
         if let Some(per_hart) = &machine.jit_stats {
             use std::sync::atomic::Ordering::Relaxed;
             let sum = |f: fn(&rv_machine::JitStats) -> &std::sync::atomic::AtomicU64| {

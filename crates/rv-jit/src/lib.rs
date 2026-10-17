@@ -179,6 +179,8 @@ fn supported(op: Op) -> bool {
             | CzeroNez
             | MopR
             | MopRr
+            | Vsetvli
+            | Vsetivli
     )
 }
 
@@ -395,6 +397,7 @@ impl Compiler {
             data_priv,
             pc0: state, // replaced below
             page_offset: (info.host & (rv_core::mem::PAGE_SIZE - 1)) as i64,
+            vlenb: info.vlenb,
             dirty: 0,
             flushed: 0,
             block_sig_ref,
@@ -458,6 +461,8 @@ struct Translator<'a> {
     pc0: Value,
     /// Offset of the first instruction within its page.
     page_offset: i64,
+    /// Vector register length in bytes.
+    vlenb: u32,
     regs: [Variable; 32],
     /// Registers written so far, which must be stored back on exit.
     dirty: u32,
@@ -719,6 +724,49 @@ impl Translator<'_> {
             let v = self.b.ins().load(I64, t, self.state, reg_offset(insn.rd));
             self.b.def_var(self.regs[insn.rd as usize], v);
         }
+    }
+
+    /// VSETVLI/VSETIVLI with a valid immediate `vtype` (so a known VLMAX).
+    fn vsetvli(&mut self, insn: &Insn, vtype: u64, vlmax: u64, index: u64, offset: i64) {
+        let t = self.trusted;
+        let vs = rv_core::csr::status::VS as i64;
+        let mstatus = self.b.ins().load(I64, t, self.state, abi::MSTATUS as i32);
+        let enabled = self.b.ins().band_imm_s(mstatus, vs);
+        let (go, off) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(enabled, go, &[], off, &[]);
+        // Vector unit off: raise the illegal-instruction trap (the kernel enables the unit
+        // lazily). Handing back to the dispatcher instead would compile and run this same
+        // code again, forever.
+        self.b.switch_to_block(off);
+        let helper = self.b.ins().iconst(I64, rv_core::jit::jit_illegal as *const () as usize as i64);
+        let raw = self.b.ins().iconst(I64, insn.raw as i64);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().call_indirect(self.exec_sig_ref, helper, &[self.hart, raw, zero]);
+        self.exception_exit(index, offset);
+
+        self.b.switch_to_block(go);
+        let vlmax_v = self.b.ins().iconst(I64, vlmax as i64);
+        let vl = if insn.op == Op::Vsetivli {
+            self.b.ins().iconst(I64, (insn.rs1 as u64).min(vlmax) as i64)
+        } else if insn.rs1 != 0 {
+            let avl = self.get(insn.rs1);
+            self.b.ins().umin(avl, vlmax_v)
+        } else if insn.rd != 0 {
+            vlmax_v
+        } else {
+            // rd = rs1 = x0: new vtype, same vl.
+            let old = self.b.ins().load(I64, t, self.state, abi::VL as i32);
+            self.b.ins().umin(old, vlmax_v)
+        };
+        let vtype_v = self.b.ins().iconst(I64, vtype as i64);
+        self.b.ins().store(t, vtype_v, self.state, abi::VTYPE as i32);
+        self.b.ins().store(t, vl, self.state, abi::VL as i32);
+        let zero = self.b.ins().iconst(I64, 0);
+        self.b.ins().store(t, zero, self.state, abi::VSTART as i32);
+        // The vector state is now dirty.
+        let dirty = self.b.ins().bor_imm_s(mstatus, vs);
+        self.b.ins().store(t, dirty, self.state, abi::MSTATUS as i32);
+        self.set(insn.rd, vl);
     }
 
     fn zext32(&mut self, v: Value) -> Value {
@@ -1241,6 +1289,14 @@ impl Translator<'_> {
             Op::MopR | Op::MopRr => {
                 let zero = self.b.ins().iconst(I64, 0);
                 self.set(rd, zero);
+            }
+            Op::Vsetvli | Op::Vsetivli => {
+                let vtype = insn.imm as u64 & if insn.op == Op::Vsetvli { 0x7ff } else { 0x3ff };
+                match rv_core::vector::vlmax_for(vtype, self.vlenb as usize) {
+                    Some(vlmax) => self.vsetvli(insn, vtype, vlmax, index, offset),
+                    // Sets vill: rare, left to the interpreter.
+                    None => self.exec_via_helper(insn, index, offset),
+                }
             }
             _ => self.exec_via_helper(insn, index, offset),
         }

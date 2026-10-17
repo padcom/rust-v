@@ -14,13 +14,16 @@ from guestlib import UBUNTU, Guest
 
 args = sys.argv[1:]
 image = args.pop(0) if args and not args[0].startswith("-") else os.path.join(
-    UBUNTU, "ubuntu-26.10-server-riscv64.img")
+    UBUNTU, "ubuntu-26.10-server-riscv64-pristine.img")
 PASSWORD = "rust-v-Smoke-1"
 
 g = Guest(["-m", "4G", "--disk", image + ",snapshot"] + args, os.environ.get("SMOKE_LOG", "ubuntu-smoke.log"))
 g.wait(r"U-Boot 20"); g.mark("U-Boot")
 g.wait(r"Linux version"); g.mark("Linux")
 g.wait(r"login: "); g.mark("login prompt")
+# cloud-init sets the password after the first prompt appears; failed attempts lock the
+# account for a while, so wait until it is done.
+g.wait(r"Cloud-init v\. \S+ finished", timeout=900, anywhere=True)
 g.login("ubuntu", "ubuntu", PASSWORD); g.mark("logged in")
 g.run("uname -a; nproc; free -m | head -2")
 for extra in filter(None, os.environ.get("SMOKE_CMDS", "").split("\n")):

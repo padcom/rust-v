@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use rv_core::{Bus, Exit, Hart, HartConfig, HartShared, HostClock, TimeSource};
 
 pub use power::Shutdown;
+pub use rv_core::vector::profile::report as vector_profile_report;
 pub use rv_jit::Stats as JitStats;
 pub use rv_net;
 

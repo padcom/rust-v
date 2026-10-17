@@ -11,7 +11,7 @@ pub mod jit;
 pub mod mem;
 pub mod mmu;
 pub mod trap;
-mod vector;
+pub mod vector;
 
 pub use bus::{Bus, Device, DmaError, GuestMemory};
 pub use exec::Exit;

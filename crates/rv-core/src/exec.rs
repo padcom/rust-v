@@ -205,6 +205,7 @@ impl Hart {
             generation,
             page,
             cache_epoch: self.jit_cache_epoch,
+            vlenb: self.vlenb() as u32,
         };
         let result = self.compiler.as_mut().unwrap().compile(&insns, info);
         let b = self.blocks.block_mut(block);
