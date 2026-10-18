@@ -9,18 +9,27 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # A tag names the version it releases: v0.2.0 (or 0.2.0) needs version = "0.2.0" in Cargo.toml.
+  # The tag is the version: 0.2.0 or v0.2.0 (pre-releases like 0.2.0-rc.1) builds 0.2.0
+  # whatever Cargo.toml says, so the two cannot disagree. Untagged runs keep Cargo.toml's.
   version:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - if: startsWith(github.ref, 'refs/tags/')
+      - id: version
         run: |
-          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version $version"
-            exit 1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+              echo "::error::tag $GITHUB_REF_NAME is not a version (MAJOR.MINOR.PATCH[-PRERELEASE])"
+              exit 1
+            fi
+          else
+            version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
 
   firmware:
     needs: version
@@ -38,7 +47,7 @@ jobs:
             third_party/guest/u-boot.bin
 
   build:
-    needs: firmware
+    needs: [version, firmware]
     strategy:
       fail-fast: false
       matrix:
@@ -83,6 +92,12 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2
           "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+      - name: Set the version
+        shell: bash
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        # The first `version =` is the workspace's; perl behaves the same on every runner.
+        run: perl -pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/ and $done++ if !$done' Cargo.toml
       - run: cargo build --release --target ${{ matrix.target }} -p rust-v
       - name: Import the signing certificate
         if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''

@@ -85,8 +85,9 @@ case "$TARGET" in
       GLIBC="$(objdump -T "$STAGE/$EXE" | grep -o 'GLIBC_[0-9.]*' | cut -d_ -f2 | sort -uV | tail -1)"
       sed -e "s/@VERSION@/$DEB_VERSION/" -e "s/@ARCH@/$ARCH/" -e "s/@SIZE@/$SIZE/" -e "s/@GLIBC@/$GLIBC/" \
         "$ROOT/packaging/linux/control" > "$DEB/DEBIAN/control"
-      dpkg-deb --root-owner-group --build "$DEB" "rust-v_${DEB_VERSION}_$ARCH.deb"
-      OUT+=("rust-v_${DEB_VERSION}_$ARCH.deb")
+      # The file is named with the plain version: GitHub turns a "~" in asset names into ".".
+      dpkg-deb --root-owner-group --build "$DEB" "rust-v_${VERSION}_$ARCH.deb"
+      OUT+=("rust-v_${VERSION}_$ARCH.deb")
       rm -rf "$DEB"
     else
       skip "dpkg-deb not found, no .deb"

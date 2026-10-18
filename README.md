@@ -241,10 +241,10 @@ unless `MACOS_SIGNING_IDENTITY` is set; `MACOS_INSTALLER_IDENTITY` signs the `.p
 
 ### Releasing
 
-1. Set `version` in the workspace `Cargo.toml` (e.g. `0.2.0`) and commit.
-2. Push a matching tag, with or without the `v`: `git tag v0.2.0 && git push origin v0.2.0`.
-
-The Release workflow refuses a tag that does not match the version, builds the firmware and
+Push a version tag, with or without the `v`: `git tag 0.2.0 && git push origin 0.2.0`. The
+tag is the version: the Release workflow builds it as that version whatever `Cargo.toml`
+says (bumping `Cargo.toml` too keeps local builds' `--version` in step), refuses tags that
+are not `MAJOR.MINOR.PATCH[-PRERELEASE]`, builds the firmware and
 the six targets, and publishes a GitHub release with all packages, a `SHA256SUMS` file, the
 download table from `packaging/release-notes.md` and notes generated from the commits.
 Tags with a `-` (`v0.2.0-rc.1`) become pre-releases. Running the workflow by hand (Actions →
