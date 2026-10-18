@@ -125,9 +125,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rust-v-config-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("vm.toml");
+        // Absolute on every host (on Windows, `/abs` is relative to the current drive).
+        let abs = std::env::temp_dir().join("b.img").display().to_string();
         std::fs::write(
             &file,
-            "memory = \"4G\"\nsmp = 2\ndisk = [\"a.img,snapshot\", \"/abs/b.img\"]\nno_net = true\nstats = false\n",
+            format!(
+                "memory = \"4G\"\nsmp = 2\ndisk = [\"a.img,snapshot\", '{abs}']\nno_net = true\nstats = false\n"
+            ),
         )
         .unwrap();
         let args = vec![
@@ -142,17 +146,7 @@ mod tests {
         assert_eq!(
             out,
             [
-                "rust-v",
-                "--disk",
-                &a,
-                "--disk",
-                "/abs/b.img",
-                "--memory",
-                "4G",
-                "--no-net",
-                "--smp",
-                "2",
-                "--smp",
+                "rust-v", "--disk", &a, "--disk", &abs, "--memory", "4G", "--no-net", "--smp", "2", "--smp",
                 "8"
             ]
         );
