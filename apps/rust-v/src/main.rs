@@ -501,6 +501,10 @@ fn run(args: Args) -> Result<Shutdown, String> {
 
 fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().collect();
+    // Usage messages say rust-v whatever the program was started as (AppRun in an AppImage).
+    if let Some(name) = argv.first_mut() {
+        *name = "rust-v".into();
+    }
     let distro = match argv.get(1).map(String::as_str) {
         Some("ubuntu") => Some(&distro::UBUNTU),
         Some("debian") => Some(&distro::DEBIAN),

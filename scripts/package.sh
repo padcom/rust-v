@@ -10,7 +10,9 @@
 #   every target   rust-v-VERSION-TARGET.tar.gz (.zip on Windows): the binary with firmware/
 #                  next to it, where rust-v looks first; runs from wherever it is unpacked
 #   Linux          rust-v_VERSION_ARCH.deb (needs dpkg-deb): /usr/bin/rust-v and
-#                  /usr/share/rust-v/firmware
+#                  /usr/share/rust-v/firmware; rust-v-VERSION-ARCH.AppImage (needs
+#                  appimagetool; $APPIMAGE_RUNTIME names the runtime to embed instead of
+#                  the one it would download)
 #   macOS          rust-v-VERSION-TARGET.pkg: /usr/local/bin/rust-v and
 #                  /usr/local/share/rust-v/firmware; signed with $MACOS_INSTALLER_IDENTITY if set
 #   Windows        rust-v-VERSION-TARGET.msi (needs WiX 5, `wix`): Program Files\rust-v, on PATH
@@ -91,6 +93,23 @@ case "$TARGET" in
       rm -rf "$DEB"
     else
       skip "dpkg-deb not found, no .deb"
+    fi
+    if command -v appimagetool >/dev/null; then
+      APPDIR="$DIST/appdir-$TARGET"
+      APPIMAGE="rust-v-$VERSION-${TARGET%%-*}.AppImage"
+      rm -rf "$APPDIR" && mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/rust-v"
+      install -m 755 "$STAGE/$EXE" "$APPDIR/usr/bin/"
+      cp -r "$STAGE/firmware" "$APPDIR/usr/share/rust-v/"
+      cp "$ROOT/packaging/linux/rust-v.desktop" "$ROOT/packaging/linux/rust-v.svg" "$APPDIR/"
+      ln -s usr/bin/rust-v "$APPDIR/AppRun"
+      # Only the binary goes in: it needs glibc and ALSA, which every desktop has (and the
+      # AppImage excludelist leaves out), and loads X11, Wayland and virglrenderer itself.
+      ARCH="${TARGET%%-*}" appimagetool --no-appstream \
+        ${APPIMAGE_RUNTIME:+--runtime-file "$APPIMAGE_RUNTIME"} "$APPDIR" "$APPIMAGE"
+      OUT+=("$APPIMAGE")
+      rm -rf "$APPDIR"
+    else
+      skip "appimagetool not found, no .AppImage"
     fi
     ;;
   *apple-darwin)

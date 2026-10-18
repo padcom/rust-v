@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <g stroke="#7a8794" stroke-width="10" stroke-linecap="round">
+    <path d="M88 24v32M128 24v32M168 24v32M88 200v32M128 200v32M168 200v32M24 88h32M24 128h32M24 168h32M200 88h32M200 128h32M200 168h32"/>
+  </g>
+  <rect x="52" y="52" width="152" height="152" rx="18" fill="#283a52"/>
+  <text x="128" y="152" text-anchor="middle" font-family="DejaVu Sans, sans-serif" font-size="72" font-weight="bold" fill="#f2b33d">R-V</text>
+</svg>

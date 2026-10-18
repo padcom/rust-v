@@ -78,6 +78,24 @@ jobs:
           targets: ${{ matrix.target }}
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # Pinned appimagetool and AppImage runtime; the runner has no FUSE, so the tool runs
+      # extracted.
+      - name: Install appimagetool
+        if: runner.os == 'Linux'
+        working-directory: ${{ runner.temp }}
+        run: |
+          arch="${{ matrix.target }}" && arch="${arch%%-*}"
+          curl -sSfLO "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-$arch.AppImage"
+          curl -sSfLO "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-$arch"
+          grep -- "-$arch" <<'SUMS' | sha256sum -c
+          ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool-x86_64.AppImage
+          2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  runtime-x86_64
+          f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158  appimagetool-aarch64.AppImage
+          00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444  runtime-aarch64
+          SUMS
+          sudo install -m 755 "appimagetool-$arch.AppImage" /usr/local/bin/appimagetool
+          echo "APPIMAGE_RUNTIME=$PWD/runtime-$arch" >> "$GITHUB_ENV"
+          echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
       - uses: actions/download-artifact@v4
         with:
           name: firmware
@@ -135,6 +153,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*.deb
+            dist/*.AppImage
             dist/*.pkg
             dist/*.msi
           if-no-files-found: error

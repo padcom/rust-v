@@ -226,6 +226,7 @@ x86-64 and arm64 each:
 | Host | Installer | Installs to |
 |------|-----------|-------------|
 | Linux | `rust-v_VERSION_ARCH.deb` | `/usr/bin/rust-v`, firmware in `/usr/share/rust-v/firmware` |
+| Linux | `rust-v-VERSION-ARCH.AppImage` | nowhere: one executable file, run in place of `rust-v` on any distribution |
 | macOS | `rust-v-VERSION-TARGET.pkg` | `/usr/local/bin/rust-v`, firmware in `/usr/local/share/rust-v/firmware` |
 | Windows | `rust-v-VERSION-TARGET.msi` | `Program Files\rust-v` (added to `PATH`), firmware in `firmware\` beside it |
 
@@ -235,7 +236,8 @@ glibc 2.35 or newer.
 
 `scripts/package.sh TARGET` (after `cargo build --release --target TARGET`) builds the same
 files in `dist/`: the archive always, and the installer for the host (the `.deb` needs
-`dpkg-deb`, the `.msi` WiX 5's `wix`; one whose tool is missing is skipped). On macOS the
+`dpkg-deb`, the AppImage `appimagetool`, the `.msi` WiX 5's `wix`; one whose tool is
+missing is skipped). On macOS the
 binary is signed with the JIT entitlement (`packaging/macos/rust-v.entitlements`), ad hoc
 unless `MACOS_SIGNING_IDENTITY` is set; `MACOS_INSTALLER_IDENTITY` signs the `.pkg`.
 

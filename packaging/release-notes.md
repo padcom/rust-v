@@ -2,8 +2,8 @@
 
 | Host | Installer | Archive (unpack and run in place) |
 |------|-----------|-----------------------------------|
-| Linux x86-64 | `rust-v_*_amd64.deb` (`sudo apt install ./rust-v_*_amd64.deb`) | `rust-v-*-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux arm64 | `rust-v_*_arm64.deb` | `rust-v-*-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x86-64 | `rust-v_*_amd64.deb` (`sudo apt install ./rust-v_*_amd64.deb`), or any distribution: `rust-v-*-x86_64.AppImage` | `rust-v-*-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `rust-v_*_arm64.deb`, `rust-v-*-aarch64.AppImage` | `rust-v-*-aarch64-unknown-linux-gnu.tar.gz` |
 | macOS Apple silicon | `rust-v-*-aarch64-apple-darwin.pkg` | `rust-v-*-aarch64-apple-darwin.tar.gz` |
 | macOS Intel | `rust-v-*-x86_64-apple-darwin.pkg` | `rust-v-*-x86_64-apple-darwin.tar.gz` |
 | Windows x86-64 | `rust-v-*-x86_64-pc-windows-msvc.msi` | `rust-v-*-x86_64-pc-windows-msvc.zip` |
@@ -12,6 +12,10 @@
 The installers put `rust-v` on the `PATH` (`/usr/bin`, `/usr/local/bin`, or
 `Program Files\rust-v` on Windows) along with the bundled OpenSBI and U-Boot firmware.
 `SHA256SUMS` lists the checksums of all files.
+
+The AppImage needs no installation: `chmod +x rust-v-*.AppImage` and run it in place of
+`rust-v` (e.g. `./rust-v-*-x86_64.AppImage ubuntu`). It mounts itself with FUSE; where
+FUSE is not available (some containers), add `--appimage-extract-and-run`.
 
 Then start a distribution, which is downloaded on first use:
 

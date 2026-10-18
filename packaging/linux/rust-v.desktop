@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=rust-v
+Comment=RISC-V RVA23 virtual machine
+Exec=rust-v
+Icon=rust-v
+Terminal=true
+Categories=System;Emulator;
