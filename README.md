@@ -45,6 +45,7 @@ The quickest way, once the firmware is built (below) or with a release package:
 ```sh
 target/release/rust-v ubuntu                       # serial console in this terminal
 target/release/rust-v ubuntu -- --display window   # options after -- go to the emulator
+target/release/rust-v debian                       # Debian 13 (trixie) the same way
 ```
 
 The first run downloads Ubuntu's preinstalled RISC-V server image (about 1.3 GB, with
@@ -54,6 +55,12 @@ The first run downloads Ubuntu's preinstalled RISC-V server image (about 1.3 GB,
 the system keeps its changes (`--fresh` starts over). It boots with 4 GB of RAM and host
 port 2222 forwarded to the guest's SSH (`ssh -p 2222 ubuntu@localhost`). `rust-v ubuntu
 --help` lists the options (`--release`, `--size`, `--memory`, `--ssh-port`, `--dir`).
+
+`rust-v debian` does the same with Debian's official `nocloud` image (311 MB, checked against
+its SHA512SUMS). Its first boot asks for a time zone (Enter skips it) and a root password:
+set one, since skipping it leaves root locked, then log in as `root`. For SSH, add a user. The
+image does not grow its root file system by itself; to use the 16 GB:
+`apt install cloud-guest-utils && growpart /dev/vda 1 && resize2fs /dev/vda1`.
 
 By hand, the same image boots through OpenSBI, U-Boot and GRUB:
 

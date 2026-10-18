@@ -61,8 +61,10 @@ and running the page. Notes:
   and lists no extensions, so rust-v rewrites virglrenderer's GLSL (`#version 410`, no
   `#extension` lines for core features). GTK 4 applications draw correctly; the live ISO's
   installer, a snap with its own Mesa, draws without text.
-- One untraced kmscube run on macOS hung the guest (kmscube crashed, then GPU and disk
-  work stopped); six traced repeats did not reproduce it yet.
+- Twice the guest's disk I/O stopped completing, with all harts idle (waiting for an
+  interrupt): once during a kmscube run on the Ubuntu server image (virgl), once early in a
+  Debian first boot (no GPU). So it is not virgl's; about twenty further boots of either did
+  not reproduce it. Open.
 
 ## What changed in the first round
 

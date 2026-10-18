@@ -8,19 +8,19 @@ use clap::Parser;
 mod audio;
 mod clipboard;
 mod config;
+mod distro;
 mod gui;
 mod image;
 mod keymap;
 mod screenshot;
-mod ubuntu;
 use rv_machine::{Machine, MachineConfig, Shutdown};
 
 /// RISC-V RVA23 system emulator.
 ///
 /// `rust-v --disk ubuntu.img` boots a disk image with the bundled firmware (OpenSBI and
 /// U-Boot). `--config vm.toml` reads options from a file (command-line options win).
-/// `rust-v image --help` lists the disk image tools; `rust-v ubuntu` downloads Ubuntu Server
-/// (once) and boots it.
+/// `rust-v image --help` lists the disk image tools; `rust-v ubuntu` and `rust-v debian` download
+/// Ubuntu Server or Debian (once) and boot it.
 #[derive(Parser)]
 #[command(version, about, args_override_self = true)]
 struct Args {
@@ -449,10 +449,14 @@ fn run(args: Args) -> Result<Shutdown, String> {
 
 fn main() -> ExitCode {
     let mut argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).map(String::as_str) == Some("ubuntu") {
-        argv = match ubuntu::prepare(
-            std::iter::once("rust-v ubuntu".to_string()).chain(argv.into_iter().skip(2)),
-        ) {
+    let distro = match argv.get(1).map(String::as_str) {
+        Some("ubuntu") => Some(&distro::UBUNTU),
+        Some("debian") => Some(&distro::DEBIAN),
+        _ => None,
+    };
+    if let Some(distro) = distro {
+        let name = format!("rust-v {}", distro.name);
+        argv = match distro::prepare(distro, std::iter::once(name).chain(argv.into_iter().skip(2))) {
             Ok(argv) => argv,
             Err(e) => {
                 eprintln!("rust-v: {e}");
