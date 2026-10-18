@@ -1,0 +1,36 @@
+<!--
+  Windows installer (WiX 5): rust-v.exe with its firmware in Program Files\rust-v, added to
+  the system PATH. Built by scripts/package.sh:
+    wix build -arch x64|arm64 -d Version=X.Y.Z -d Stage=DIR -o rust-v.msi rust-v.wxs
+  The UpgradeCode stays fixed across versions so a newer package replaces an older one.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="rust-v" Manufacturer="rust-v" Version="$(Version)"
+           UpgradeCode="A01DB25F-DFDA-4951-8F64-A72285022037" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of rust-v is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="rust-v">
+        <Directory Id="FIRMWAREFOLDER" Name="firmware" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(Stage)\rust-v.exe" KeyPath="yes" />
+        <Environment Id="PATH" Name="PATH" Value="[INSTALLFOLDER]" Part="last" Action="set"
+                     System="yes" Permanent="no" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(Stage)\README.md" />
+      </Component>
+      <Component Directory="FIRMWAREFOLDER">
+        <File Source="$(Stage)\firmware\fw_dynamic.bin" />
+      </Component>
+      <Component Directory="FIRMWAREFOLDER">
+        <File Source="$(Stage)\firmware\u-boot.bin" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>
