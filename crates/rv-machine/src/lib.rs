@@ -109,6 +109,9 @@ pub struct MachineConfig {
     pub shares: Vec<Share>,
     /// Add a virtio-console port for the guest's SPICE agent, sharing the clipboard.
     pub clipboard: bool,
+    /// Add a virtio-console port for the QEMU guest agent (qemu-ga), for running commands
+    /// and reading and writing files in the guest.
+    pub guest_agent: bool,
 }
 
 /// A host directory shared with the guest (mount tag `tag`).
@@ -151,6 +154,7 @@ impl Default for MachineConfig {
             sound: false,
             shares: Vec::new(),
             clipboard: false,
+            guest_agent: false,
         }
     }
 }
@@ -170,6 +174,8 @@ pub struct Machine {
     pub audio: Option<Arc<virtio::snd::AudioRing>>,
     /// Clipboard sharing, when enabled: the host's side, and the guest's copied text.
     pub clipboard: Option<(virtio::console::ClipboardHandle, std::sync::mpsc::Receiver<String>)>,
+    /// The guest agent's port, when enabled: the host's end, and the bytes the guest sends.
+    pub guest_agent: Option<(virtio::console::GuestAgentHandle, std::sync::mpsc::Receiver<Vec<u8>>)>,
     /// Host addresses of the network's TCP forwards, in configuration order.
     pub forwarded: Vec<std::net::SocketAddr>,
     pub power: Arc<power::PowerState>,
@@ -318,11 +324,13 @@ impl Machine {
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
         }
-        let mut clipboard = None;
-        if config.clipboard {
+        let (mut clipboard, mut guest_agent) = (None, None);
+        if config.clipboard || config.guest_agent {
             let (tx, rx) = std::sync::mpsc::channel();
-            let (dev, handle) = virtio::console::Console::new(tx);
-            clipboard = Some((handle, rx));
+            let (dev, ports) =
+                virtio::console::Console::new(config.clipboard.then_some(tx), config.guest_agent);
+            clipboard = ports.clipboard.map(|handle| (handle, rx));
+            guest_agent = ports.guest_agent;
             virtio_devices.push(Box::new(dev));
         }
         let device_types: Vec<String> = virtio_devices.iter().map(|d| d.device_type().to_string()).collect();
@@ -452,6 +460,7 @@ impl Machine {
             tablet,
             audio,
             clipboard,
+            guest_agent,
             forwarded,
             power,
             dtb,

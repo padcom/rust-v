@@ -1,5 +1,5 @@
 //! Periodic screenshots of the guest display as PNG files, for checking a guest without
-//! looking at it (and for scripted tests).
+//! looking at it (and for scripted tests and the MCP server).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -28,7 +28,7 @@ pub fn spawn(display: Arc<Display>, path: PathBuf, interval: Duration) {
     });
 }
 
-/// Encodes `0x00RRGGBB` pixels as an RGB PNG (uncompressed deflate blocks: no dependencies).
+/// Encodes `0x00RRGGBB` pixels as an RGB PNG.
 pub fn encode_png(width: u32, height: u32, pixels: &[u32]) -> Vec<u8> {
     let mut raw = Vec::with_capacity((height * (1 + 3 * width)) as usize);
     for row in pixels.chunks_exact(width as usize) {
@@ -37,19 +37,8 @@ pub fn encode_png(width: u32, height: u32, pixels: &[u32]) -> Vec<u8> {
             raw.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, p as u8]);
         }
     }
-    let mut z = vec![0x78, 0x01];
-    let mut blocks = raw.chunks(65535).peekable();
-    if blocks.peek().is_none() {
-        z.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
-    }
-    while let Some(block) = blocks.next() {
-        z.push(blocks.peek().is_none() as u8);
-        let len = block.len() as u16;
-        z.extend_from_slice(&len.to_le_bytes());
-        z.extend_from_slice(&(!len).to_le_bytes());
-        z.extend_from_slice(block);
-    }
-    z.extend_from_slice(&adler32(&raw).to_be_bytes());
+    // Fast compression: screens are mostly flat colour, which even level 1 squeezes well.
+    let z = miniz_oxide::deflate::compress_to_vec_zlib(&raw, 1);
 
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     let mut ihdr = Vec::new();
@@ -82,19 +71,6 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for chunk in data.chunks(5552) {
-        for &x in chunk {
-            a += x as u32;
-            b += a;
-        }
-        a %= 65521;
-        b %= 65521;
-    }
-    (b << 16) | a
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,7 +78,6 @@ mod tests {
     #[test]
     fn checksums() {
         assert_eq!(crc32(b"IEND"), 0xae42_6082);
-        assert_eq!(adler32(b"Wikipedia"), 0x11e6_0398);
     }
 
     #[test]
@@ -111,5 +86,7 @@ mod tests {
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert_eq!(&png[12..16], b"IHDR");
         assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
+        let idat = &png[41..png.len() - 16];
+        assert_eq!(miniz_oxide::inflate::decompress_to_vec_zlib(idat).unwrap(), [0, 255, 0, 0, 0, 255, 0]);
     }
 }

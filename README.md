@@ -180,6 +180,44 @@ share = ["~/src,tag=src"]
 64G` (Ubuntu grows its root partition on the next boot), `clone SRC DST` (copy-on-write on
 APFS, Btrfs and XFS) and `info IMG` (size, allocated space, partition table).
 
+## Letting an AI assistant use the machine (MCP)
+
+`--mcp` runs a [Model Context Protocol](https://modelcontextprotocol.io) server, so an
+assistant such as Claude Code can log in, run commands, move files and operate the desktop.
+Over stdio the assistant starts the machine itself:
+
+```sh
+rust-v debian            # once, to download the image and answer the first-boot questions
+claude mcp add rust-v -- rust-v debian -- --mcp stdio
+```
+
+Or keep the machine in a terminal of your own and connect over HTTP (on 127.0.0.1 unless
+an address is given; requests from web pages of other origins are refused):
+
+```sh
+rust-v debian -- --mcp 7700 --display window
+claude mcp add --transport http rust-v http://127.0.0.1:7700/mcp
+```
+
+With `stdio` the serial console belongs to the MCP client and is not shown in the terminal.
+The tools:
+
+| Tool | What it does |
+|------|--------------|
+| `console_read`, `console_write` | Read the serial console's output (escape sequences removed); type on it (log in, answer prompts, Ctrl-C) |
+| `console_run` | Run a shell command at the console's prompt and return its output and exit status |
+| `guest_exec` | Run a command as root through the QEMU guest agent: exit status, stdout, stderr, no login needed |
+| `guest_read_file`, `guest_write_file` | Read or write a guest file through the agent (text or base64, up to 16 MiB) |
+| `screenshot` | The display as a PNG (with `--display window` or `headless`) |
+| `type_text`, `press_keys`, `mouse_move`, `mouse_click`, `mouse_drag`, `mouse_scroll` | Keyboard and mouse on the display (coordinates are screenshot pixels) |
+| `machine_status` | Display size, whether the guest agent is running, uptime |
+
+`--mcp` adds a virtio-serial port `org.qemu.guest_agent.0` for the guest_* tools. They need
+qemu-guest-agent in the guest: `apt install qemu-guest-agent`, then `systemctl start
+qemu-guest-agent` if it is not running. Until it is installed, the console tools still work (an assistant can install it with
+`console_run` once logged in). `scripts/mcp-smoke.py` checks all of this end to end against
+Debian.
+
 ## Packages
 
 Tagged releases on GitHub carry installers and archives for Linux, macOS and Windows,

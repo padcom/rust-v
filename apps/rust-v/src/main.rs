@@ -9,9 +9,11 @@ mod audio;
 mod clipboard;
 mod config;
 mod distro;
+mod guest_agent;
 mod gui;
 mod image;
 mod keymap;
+mod mcp;
 mod screenshot;
 use rv_machine::{Machine, MachineConfig, Shutdown};
 
@@ -114,6 +116,12 @@ struct Args {
     /// Wait for a GDB connection on this address (e.g. 1234 or 0.0.0.0:1234) and start halted.
     #[arg(long, value_name = "[HOST:]PORT")]
     gdb: Option<String>,
+    /// Serve the Model Context Protocol, so an AI assistant can use the machine: `stdio` (the
+    /// assistant starts rust-v; the console is then only reachable through MCP) or
+    /// `[HOST:]PORT` for HTTP at http://HOST:PORT/mcp (HOST defaults to 127.0.0.1). Adds a
+    /// port for the QEMU guest agent, which the guest_* tools use.
+    #[arg(long, value_name = "stdio|[HOST:]PORT")]
+    mcp: Option<String>,
     /// Print execution statistics on exit.
     #[arg(long)]
     stats: bool,
@@ -339,13 +347,20 @@ fn run(args: Args) -> Result<Shutdown, String> {
         virgl: args.gpu == "virgl",
         sound: args.display != "none" && !args.no_sound,
         clipboard: args.display != "none" && !args.no_clipboard,
+        guest_agent: args.mcp.is_some(),
         shares: args.share.iter().enumerate().map(|(i, s)| parse_share(i, s)).collect::<Result<_, _>>()?,
     };
     if let (Some(display), Some(path)) = (&config.display, &args.screenshot) {
         screenshot::spawn(display.clone(), path.clone(), std::time::Duration::from_secs(2));
     }
-    let window = config.display.clone().filter(|_| args.display == "window");
-    let mut machine = Machine::new(config, Box::new(std::io::stdout())).map_err(|e| e.to_string())?;
+    let display = config.display.clone();
+    let window = display.clone().filter(|_| args.display == "window");
+    let mcp_stdio = args.mcp.as_deref() == Some("stdio");
+    let console_log = mcp::ConsoleLog::new();
+    // Over stdio MCP owns stdout, so the console goes only to the MCP tools.
+    let console =
+        mcp::Tee { log: console_log.clone(), out: (!mcp_stdio).then(|| Box::new(std::io::stdout()) as _) };
+    let mut machine = Machine::new(config, Box::new(console)).map_err(|e| e.to_string())?;
     if let Some(path) = &args.dump_dtb {
         std::fs::write(path, &machine.dtb).map_err(|e| format!("{}: {e}", path.display()))?;
     }
@@ -365,7 +380,20 @@ fn run(args: Args) -> Result<Shutdown, String> {
         eprintln!("rust-v: clipboard not shared: {e}");
     }
 
-    let interactive = std::io::stdin().is_terminal();
+    if let Some(how) = &args.mcp {
+        let agent = machine.guest_agent.take().map(|(port, rx)| guest_agent::GuestAgent::new(port, rx));
+        let devices =
+            mcp::Devices { display, keyboard: machine.keyboard.clone(), tablet: machine.tablet.clone() };
+        let server = mcp::Server::new(console_log, machine.uart.clone(), agent, devices);
+        if mcp_stdio {
+            mcp::serve_stdio(server);
+        } else {
+            let url = mcp::serve_http(server, how)?;
+            eprint!("rust-v: MCP server at {url}\r\n");
+        }
+    }
+
+    let interactive = !mcp_stdio && std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };
     if interactive {
         eprint!("rust-v: press Ctrl-A x to quit, Ctrl-A s to save a snapshot, Ctrl-A i for device state\r\n");
@@ -393,13 +421,15 @@ fn run(args: Args) -> Result<Shutdown, String> {
             }
         });
     }
-    spawn_console_input(
-        machine.uart.clone(),
-        interactive,
-        machine.snapshot_handle(),
-        args.snapshot_file.clone(),
-        dump,
-    );
+    if !mcp_stdio {
+        spawn_console_input(
+            machine.uart.clone(),
+            interactive,
+            machine.snapshot_handle(),
+            args.snapshot_file.clone(),
+            dump,
+        );
+    }
     let reason = match window {
         // The window's event loop must own the main thread (macOS requires it), so the
         // machine runs on another one.
