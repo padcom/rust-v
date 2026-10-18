@@ -204,7 +204,7 @@ unless `MACOS_SIGNING_IDENTITY` is set; `MACOS_INSTALLER_IDENTITY` signs the `.p
 ### Releasing
 
 1. Set `version` in the workspace `Cargo.toml` (e.g. `0.2.0`) and commit.
-2. Push a matching tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Push a matching tag, with or without the `v`: `git tag v0.2.0 && git push origin v0.2.0`.
 
 The Release workflow refuses a tag that does not match the version, builds the firmware and
 the six targets, and publishes a GitHub release with all packages, a `SHA256SUMS` file, the

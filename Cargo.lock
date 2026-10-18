@@ -1870,7 +1870,7 @@ dependencies = [
 
 [[package]]
 name = "rust-v"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "arboard",
  "clap",
@@ -1934,7 +1934,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rv-conformance"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "rv-core",
  "rv-elf",
@@ -1943,7 +1943,7 @@ dependencies = [
 
 [[package]]
 name = "rv-core"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "rv-isa",
  "rv-softfloat",
@@ -1951,15 +1951,15 @@ dependencies = [
 
 [[package]]
 name = "rv-elf"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "rv-isa"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "rv-jit"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "cranelift-codegen",
  "cranelift-frontend",
@@ -1973,7 +1973,7 @@ dependencies = [
 
 [[package]]
 name = "rv-machine"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "getrandom 0.3.4",
  "libloading",
@@ -1985,7 +1985,7 @@ dependencies = [
 
 [[package]]
 name = "rv-net"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 dependencies = [
  "mio",
  "smoltcp",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "rv-softfloat"
-version = "0.1.0"
+version = "0.1.0-rc.1"
 
 [[package]]
 name = "same-file"
