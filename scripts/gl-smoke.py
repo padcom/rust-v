@@ -51,13 +51,13 @@ g = boot(image + ",snapshot", ["--display", "headless", "--screenshot", shot] + 
 g.login("ubuntu", PASSWORD); g.mark("logged in")
 sudo(g, 'eglinfo -B -p surfaceless 2>&1 | grep -E "OpenGL (core|ES) profile (renderer|version)"')
 g.mark("eglinfo")
-# kmscube (in the background; it stops at input on stdin, so it gets one that stays quiet)
-# for 10 s, with a screenshot of it running.
-sudo(g, "(sleep 30 | kmscube -c 600 >/tmp/kmscube.txt 2>&1 &)")
+# 300 frames of kmscube (in the background; it stops at input on stdin, so it gets one that
+# stays quiet), with a screenshot of it running; at most 100 s.
+sudo(g, "(sleep 120 | timeout 100 kmscube -c 300 >/tmp/kmscube.txt 2>&1 &)")
 time.sleep(6)
 if os.path.exists(shot):
     shutil.copyfile(shot, os.path.splitext(shot)[0] + "-kmscube.png")
-g.run("sleep 6; tail -2 /tmp/kmscube.txt")
+g.run("while pgrep -x kmscube >/dev/null; do sleep 1; done; tail -2 /tmp/kmscube.txt", timeout=300)
 g.mark("kmscube")
 for extra in filter(None, os.environ.get("SMOKE_CMDS", "").split("\n")):
     g.run(extra, timeout=1800)

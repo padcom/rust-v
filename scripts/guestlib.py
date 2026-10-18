@@ -71,6 +71,13 @@ class Guest:
         self.send(command + "; echo cmd-done-$((6*7))\n")
         self.wait(r"cmd-done-42", timeout=timeout)
 
+    def output(self, command, timeout=900):
+        """Runs a shell command at a prompt and returns what it printed."""
+        # The markers are computed, so the echoed command line does not match them.
+        self.send(f'echo "<<$((1+1))"; {command}; echo ">>$((2+2))"\n')
+        m = self.wait(r"<<2\r?\n(.*?)>>4", timeout=timeout)
+        return m.group(1).decode(errors="replace").replace("\r\n", "\n")
+
     def mark(self, what):
         print(f"{time.monotonic() - self.start:7.1f}s  {what}", flush=True)
 
@@ -95,3 +102,33 @@ class Guest:
             self.send(new_password + "\n"); self.wait(r"Retype new password: ")
             self.send(new_password + "\n")
         self.wait(r"\$ ")
+
+
+def boot_desktop(args, log):
+    """Boots the Ubuntu desktop live ISO with a serial console and logs in on it once GNOME is
+    up and showing the live session."""
+    iso = os.path.join(UBUNTU, "ubuntu-26.10-desktop-riscv64.iso")
+    g = Guest(["-m", "8G", "--disk", iso + ",ro"] + args, log)
+    g.wait(r"Try or Install Ubuntu"); g.mark("GRUB")
+    # Boot the menu entry's kernel from GRUB's command line, with a serial console added.
+    g.send("c")
+    g.wait(r"grub> ")
+    g.send("linux /casper/vmlinux console=tty0 console=ttyS0 sysctl.kernel.watchdog_thresh=60 --- splash\n",
+           delay=0.01)
+    g.wait(r"grub> ")
+    g.send("initrd /casper/initrd\n", delay=0.01)
+    g.wait(r"grub> ", timeout=900)
+    g.send("boot\n", delay=0.01)
+    g.wait(r"Linux version"); g.mark("Linux")
+    g.wait(r"login: ", timeout=1800); g.mark("serial login prompt")
+    g.login("ubuntu", "")
+    g.mark("logged in")
+    g.run("until pgrep -u ubuntu -x gnome-shell >/dev/null; do sleep 2; done", timeout=1800)
+    g.mark("gnome-shell running")
+    # GDM starts a login screen next to the live session and switches to it; switch back.
+    g.run("for i in $(seq 120); do loginctl list-sessions --no-legend | grep -q greeter && break; "
+          "sleep 2; done; sleep 5; sudo loginctl activate "
+          "$(loginctl list-sessions --no-legend | awk '$3 == \"ubuntu\" && $4 == \"seat0\" {print $1}')",
+          timeout=600)
+    g.mark("live session shown")
+    return g

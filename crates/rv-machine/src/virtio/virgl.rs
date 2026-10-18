@@ -259,6 +259,12 @@ mod cgl {
             }
         }
         let fixed = super::fix_glsl(&String::from_utf8_lossy(&source));
+        if let Some(dir) = std::env::var_os("RV_GPU_SHADERS") {
+            // A copy of every shader as compiled, for debugging rendering differences.
+            static COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = std::fs::write(std::path::Path::new(&dir).join(format!("{n:05}-{shader}.glsl")), &fixed);
+        }
         let fixed = std::ffi::CString::new(fixed).unwrap_or_default();
         let real = REAL_SHADER_SOURCE.get().expect("shim installed without the real function");
         // SAFETY: one NUL-terminated string.

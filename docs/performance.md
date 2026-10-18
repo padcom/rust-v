@@ -1,4 +1,4 @@
-# Performance work (Phase 8, first round)
+# Performance work (Phase 8)
 
 Measured on an Apple M-series host (18 cores), 4 harts, default settings, Ubuntu 26.10.
 
@@ -36,7 +36,35 @@ Desktop session (boot, GNOME, Firefox twice, about 15 minutes):
 | Code generated | 14.9 GB | 11.2 GB |
 | Firefox headless, Wikipedia article, cold | — | 74 s |
 
-## What changed
+## Second round: GPU acceleration (`--gpu virgl`)
+
+The guest's Mesa `virgl` driver sends OpenGL work to virglrenderer on the host, which
+replays it on the host GPU (Apple M5 Max here, through Apple's OpenGL 4.1; on Linux through
+EGL). Measured against `--gpu 2d` (the guest renders with llvmpipe), same host, one run each:
+
+| | 2d | virgl |
+|---|---|---|
+| kmscube (`scripts/gl-smoke.py`) | 29 fps | 60 fps (vsync limit) |
+| Desktop ISO to GNOME Shell running | 311 s | 311 s |
+| GNOME Shell CPU time, boot to end of session | 155 s | 100 s |
+| Guest CPU, 60 s on an idle desktop | 132 CPU-s | 133 CPU-s |
+| Firefox, Wikipedia RISC-V article on screen | ~100 s | ~100 s |
+| Guest CPU over those 150 s | 539 CPU-s | 523 CPU-s |
+
+So rendering is fast now, but the desktop as a whole is not: the idle desktop keeps two of
+the four harts busy with something other than drawing, and Firefox's time goes to loading
+and running the page. Notes:
+
+- GDM starts a login screen next to the live session and switches to it after about a
+  minute, in both modes; the smoke scripts switch back (`loginctl activate`).
+- On macOS the guest gets OpenGL ES 3.0 (no desktop profile): Apple's OpenGL stops at 4.1
+  and lists no extensions, so rust-v rewrites virglrenderer's GLSL (`#version 410`, no
+  `#extension` lines for core features). GTK 4 applications draw correctly; the live ISO's
+  installer, a snap with its own Mesa, draws without text.
+- One untraced kmscube run on macOS hung the guest (kmscube crashed, then GPU and disk
+  work stopped); six traced repeats did not reproduce it yet.
+
+## What changed in the first round
 
 1. **One code cache and compiler pool for all harts** instead of one per hart: each block
    is compiled once, and a hart can use code another hart asked for. Resets are
@@ -54,11 +82,8 @@ Desktop session (boot, GNOME, Firefox twice, about 15 minutes):
 
 ## Where the time goes now, and what is next
 
-- **Rendering is on the CPU.** GNOME and Firefox draw through llvmpipe, whose shaders
-  are guest code the JIT has to compile and run. GPU acceleration (virtio-gpu 3D with
-  Venus or virgl on the host's Vulkan/Metal) is the largest remaining lever and is not
-  started: it needs a host graphics stack, host-visible memory mapped into the guest
-  address space, and the virtio-gpu 3D protocol.
+- **Rendering** can now go to the host GPU (`--gpu virgl`, above). Venus (Vulkan, with
+  host-visible memory mapped into the guest) would be the fuller path.
 - **Floating-point vector instructions** are the largest group still interpreted (vfmul,
   vfadd, vfmacc, vfcvt, ...). Native code needs RISC-V NaN, rounding-mode and exception
   flag behaviour.
