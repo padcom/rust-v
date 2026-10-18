@@ -186,6 +186,7 @@ fn spawn_console_input(
     raw: bool,
     snapshots: rv_machine::snapshot::SnapshotHandle,
     snapshot_file: PathBuf,
+    dump: Arc<dyn Fn() -> String + Send + Sync>,
 ) {
     std::thread::spawn(move || {
         let mut stdin = std::io::stdin().lock();
@@ -219,6 +220,7 @@ fn spawn_console_input(
                                 }
                             });
                         }
+                        b'i' | b'I' => eprint!("\r\n{}\r\n", dump().replace('\n', "\r\n")),
                         ESCAPE => out.push(ESCAPE),
                         _ => {}
                     }
@@ -366,17 +368,37 @@ fn run(args: Args) -> Result<Shutdown, String> {
     let interactive = std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };
     if interactive {
-        eprint!("rust-v: press Ctrl-A x to quit, Ctrl-A s to save a snapshot\r\n");
+        eprint!("rust-v: press Ctrl-A x to quit, Ctrl-A s to save a snapshot, Ctrl-A i for device state\r\n");
     }
     if let Some(path) = &args.restore {
         machine.restore(path)?;
         eprint!("rust-v: restored {}\r\n", path.display());
+    }
+    let (pci, plic) = (machine.pci.clone(), machine.plic.clone());
+    let harts: Vec<_> = machine.harts.iter().map(|h| h.shared.clone()).collect();
+    let dump: Arc<dyn Fn() -> String + Send + Sync> = Arc::new(move || {
+        let mip: Vec<String> = harts
+            .iter()
+            .map(|h| format!("{:#x}", h.mip.load(std::sync::atomic::Ordering::Relaxed)))
+            .collect();
+        format!("rust-v: device state\n{}{}hart mip: {}\n", pci.debug(), plic.debug(), mip.join(" "))
+    });
+    // RV_DEBUG_DUMP=SECONDS prints the device state that often (for catching stalls in tests).
+    if let Some(secs) = std::env::var("RV_DEBUG_DUMP").ok().and_then(|s| s.parse::<u64>().ok()) {
+        let dump = dump.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(secs.max(1)));
+                eprint!("\r\n{}\r\n", dump().replace('\n', "\r\n"));
+            }
+        });
     }
     spawn_console_input(
         machine.uart.clone(),
         interactive,
         machine.snapshot_handle(),
         args.snapshot_file.clone(),
+        dump,
     );
     let reason = match window {
         // The window's event loop must own the main thread (macOS requires it), so the

@@ -84,6 +84,22 @@ fn sstc_drives_stip() {
 }
 
 #[test]
+fn mip_writes_keep_the_external_interrupt_line() {
+    let (mut hart, _) = hart();
+    let (seip, ssip) = (1 << irq::SEI, 1 << irq::SSI);
+    let mip = |h: &Hart| h.shared.mip.load(Ordering::Relaxed);
+    // What CSRRS mip, SSIP does when the PLIC raises SEIP between its read and its write:
+    let stale = hart.csr_read(csr::MIP, 0).unwrap();
+    hart.shared.set_irq(seip, true);
+    hart.csr_write(csr::MIP, stale | ssip);
+    assert_eq!(mip(&hart) & (seip | ssip), seip | ssip, "SEIP survives a write of a stale value");
+    hart.csr_write(csr::MIP, 0);
+    assert_eq!(mip(&hart) & seip, seip, "only the PLIC lowers SEIP");
+    hart.shared.set_irq(seip, false);
+    assert_eq!(mip(&hart) & seip, 0);
+}
+
+#[test]
 fn stateen_gates_senvcfg() {
     let (mut hart, _) = hart();
     hart.state.privilege = Priv::Supervisor;

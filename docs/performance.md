@@ -61,10 +61,13 @@ and running the page. Notes:
   and lists no extensions, so rust-v rewrites virglrenderer's GLSL (`#version 410`, no
   `#extension` lines for core features). GTK 4 applications draw correctly; the live ISO's
   installer, a snap with its own Mesa, draws without text.
-- Twice the guest's disk I/O stopped completing, with all harts idle (waiting for an
-  interrupt): once during a kmscube run on the Ubuntu server image (virgl), once early in a
-  Debian first boot (no GPU). So it is not virgl's; about twenty further boots of either did
-  not reproduce it. Open.
+- Twice the guest's disk I/O stopped completing, with all harts idle: once during a kmscube
+  run (virgl), once in a Debian first boot. Not virgl's: hart 0 had lost its external
+  interrupt. OpenSBI sets `mip.SSIP` with CSRRS for every S-mode IPI; when the PLIC raised
+  SEIP between that read and write, the write put SEIP back to 0, and the PLIC, whose output
+  had not changed, never raised it again. SEIP now follows the PLIC only. Found with a
+  disk-and-network stress run that hung within three minutes and the device-state dump
+  (`Ctrl-A i`, `RV_DEBUG_DUMP`).
 
 ## What changed in the first round
 

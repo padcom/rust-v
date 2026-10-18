@@ -23,7 +23,9 @@ G=third_party/guest
 target/release/rust-v --bios $G/fw_dynamic.bin --kernel $G/Image --initrd $G/initramfs.cpio
 ```
 
-Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful options:
+Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. `Ctrl-A i` prints the
+devices' queue and interrupt state, for when the guest seems stuck (`RV_DEBUG_DUMP=SECONDS`
+prints it periodically). Useful options:
 
 | Option | Meaning |
 |---|---|

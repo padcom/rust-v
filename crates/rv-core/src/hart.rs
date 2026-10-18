@@ -270,7 +270,12 @@ const MISA: u64 = misa::MXL_64
 
 // `misa` cannot express multi-letter extensions; those are advertised through the device tree.
 
-const MIP_M_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::SEI) | (1 << irq::LCOFI);
+/// SEIP is left out: it follows the PLIC's line only. Were it writable, a CSRRS/CSRRC of `mip`
+/// (OpenSBI sets SSIP that way for every S-mode IPI) that read it as 0 just before the PLIC
+/// raised it would write the 0 back; the PLIC, whose output had not changed, would never raise
+/// it again, and the hart would stop taking external interrupts. (The architecture's software
+/// SEIP bit, which CSRRS/CSRRC see on their own, is not needed by OpenSBI or Linux.)
+const MIP_M_WRITABLE: u64 = (1 << irq::SSI) | (1 << irq::STI) | (1 << irq::LCOFI);
 const MIE_WRITABLE: u64 = (1 << irq::SSI)
     | (1 << irq::MSI)
     | (1 << irq::STI)

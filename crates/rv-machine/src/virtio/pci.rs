@@ -220,6 +220,22 @@ impl VirtioPci {
 }
 
 impl PciDevice for VirtioPci {
+    fn debug(&self) -> Option<String> {
+        // try_lock: the dump is for stalls, and must not wait on one.
+        let Ok(t) = self.transport.try_lock() else {
+            return Some(format!("virtio type {}: transport busy (locked)", self.device_type));
+        };
+        let mut s =
+            format!("virtio type {}: status {:#x} isr {}", self.device_type, t.status, self.irq.peek());
+        for (i, q) in t.queues.iter().enumerate() {
+            match q.try_lock() {
+                Ok(q) => s += &format!("\n    q{i}: {}", q.debug(&self.mem)),
+                Err(_) => s += &format!("\n    q{i}: busy (locked)"),
+            }
+        }
+        Some(s)
+    }
+
     fn save(&self, w: &mut rv_core::snapshot::Writer) {
         let t = self.transport.lock().unwrap();
         w.u32(t.device_feature_select);

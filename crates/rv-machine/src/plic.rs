@@ -100,6 +100,22 @@ impl Plic {
         Ok(())
     }
 
+    /// Lines, pending and claimed sources, and each context's enables, for diagnosing stalls.
+    pub fn debug(&self) -> String {
+        let Ok(s) = self.state.try_lock() else { return "PLIC: busy (locked)\n".into() };
+        let mut out =
+            format!("PLIC: level {:#x} pending {:#x} claimed {:#x}\n", s.level, s.pending, s.claimed);
+        for (i, c) in s.contexts.iter().enumerate() {
+            if c.enable != 0 {
+                out += &format!(
+                    "  context {i}: enable {:#x} threshold {} output {}\n",
+                    c.enable, c.threshold, c.output
+                );
+            }
+        }
+        out
+    }
+
     /// Sets the level of interrupt line `source` (1-based).
     pub fn set_level(&self, source: u32, level: bool) {
         assert!((1..NUM_SOURCES as u32).contains(&source));

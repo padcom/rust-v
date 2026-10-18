@@ -88,6 +88,11 @@ pub trait PciDevice: Send + Sync {
     fn restore(&self, _r: &mut rv_core::snapshot::Reader) -> rv_core::snapshot::Result<()> {
         Ok(())
     }
+
+    /// A description of the device's state for diagnosing stalls, if it has one.
+    fn debug(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One INTx pin of one slot. Lines are shared between slots and wired-OR'ed.
@@ -277,6 +282,24 @@ impl PciHost {
     /// First free slot.
     pub fn free_slot(&self) -> Option<usize> {
         self.functions.lock().unwrap().iter().position(Option::is_none)
+    }
+
+    /// Each device's state and the INTx lines, for diagnosing stalls.
+    pub fn debug(&self) -> String {
+        let mut out = String::new();
+        match self.intx.asserted.try_lock() {
+            Ok(a) => out += &format!("INTx A-D asserted by slots: {:x?}\n", *a),
+            Err(_) => out += "INTx: busy (locked)\n",
+        }
+        let Ok(functions) = self.functions.try_lock() else {
+            return out + "PCI functions: busy (locked)\n";
+        };
+        for (slot, f) in functions.iter().enumerate() {
+            if let Some(text) = f.as_ref().and_then(|f| f.device.debug()) {
+                out += &format!("slot {slot} (irq {}): {text}\n", self.slot_irq(slot));
+            }
+        }
+        out
     }
 
     pub fn save(&self, w: &mut rv_core::snapshot::Writer) {

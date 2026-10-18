@@ -280,6 +280,27 @@ impl Queue {
         mem.store(self.used + 2, 2, self.next_used as u64)
     }
 
+    /// The device's and the driver's view of the rings, for diagnosing stalls.
+    pub fn debug(&self, mem: &GuestMemory) -> String {
+        if !self.ready {
+            return "not ready".into();
+        }
+        let load = |addr: u64| mem.load(addr, 2).map_or_else(|_| "?".to_string(), |v| v.to_string());
+        let ring = 4 + 2 * self.size as u64;
+        format!(
+            "size {} | avail: idx {} flags {} taken {} | used: idx {} put {} signalled {} | used_event {} avail_event {}",
+            self.size,
+            load(self.avail + 2),
+            load(self.avail),
+            self.next_avail,
+            load(self.used + 2),
+            self.next_used,
+            self.signalled_used,
+            load(self.avail + ring),
+            load(self.used + 4 + 8 * self.size as u64),
+        )
+    }
+
     /// Whether the driver wants an interrupt for the chains pushed since the last one.
     pub fn needs_interrupt(&mut self, mem: &GuestMemory) -> Result<bool, DmaError> {
         fence(Ordering::SeqCst);

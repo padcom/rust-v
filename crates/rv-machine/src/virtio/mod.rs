@@ -69,6 +69,10 @@ impl Interrupt {
         self.intx.set(true);
     }
 
+    pub fn peek(&self) -> u8 {
+        *self.isr.lock().unwrap()
+    }
+
     fn isr(&self) -> u8 {
         *self.isr.lock().unwrap()
     }
