@@ -40,7 +40,22 @@ Press `Ctrl-A x` to quit; `poweroff` in the guest shell exits too. Useful option
 
 ## Running Ubuntu Server
 
-The official Ubuntu RISC-V preinstalled server image boots through OpenSBI, U-Boot and GRUB:
+The quickest way, once the firmware is built (below) or with a release package:
+
+```sh
+target/release/rust-v ubuntu                       # serial console in this terminal
+target/release/rust-v ubuntu -- --display window   # options after -- go to the emulator
+```
+
+The first run downloads Ubuntu's preinstalled RISC-V server image (about 1.3 GB, with
+`curl`), checks it against Ubuntu's SHA256SUMS and unpacks it into the data directory
+(`~/Library/Application Support/rust-v` on macOS, `~/.local/share/rust-v` on Linux,
+`%LOCALAPPDATA%\rust-v` on Windows, or `RUST_V_HOME`); later runs boot the same image, so
+the system keeps its changes (`--fresh` starts over). It boots with 4 GB of RAM and host
+port 2222 forwarded to the guest's SSH (`ssh -p 2222 ubuntu@localhost`). `rust-v ubuntu
+--help` lists the options (`--release`, `--size`, `--memory`, `--ssh-port`, `--dir`).
+
+By hand, the same image boots through OpenSBI, U-Boot and GRUB:
 
 ```sh
 scripts/build-guest-images.sh   # OpenSBI (and the bring-up kernel)
@@ -61,7 +76,7 @@ Devices and networking options:
 
 | Option | Meaning |
 |---|---|
-| `--disk PATH[,ro][,snapshot]` | raw image as a virtio-blk disk; `snapshot` keeps writes in memory |
+| `--disk PATH[,ro][,snapshot]` | raw image as a virtio-blk disk; `snapshot` keeps writes in memory. A disk written to is locked, so a second rust-v cannot open it |
 | `--forward [ADDR:]PORT:GUEST_PORT` | forward a host TCP port into the guest (repeatable) |
 | `--no-net` | no network card |
 

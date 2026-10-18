@@ -14,6 +14,8 @@ softbuffer = "0.4.8"
 toml = "1.1.8"
 winit = "0.30"
 arboard = { version = "3.7.0", default-features = false, optional = true }
+sha2 = "0.11.1"
+liblzma = { version = "0.4.8", features = ["static"] }
 
 [features]
 default = ["audio", "clipboard"]

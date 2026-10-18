@@ -12,13 +12,15 @@ mod gui;
 mod image;
 mod keymap;
 mod screenshot;
+mod ubuntu;
 use rv_machine::{Machine, MachineConfig, Shutdown};
 
 /// RISC-V RVA23 system emulator.
 ///
 /// `rust-v --disk ubuntu.img` boots a disk image with the bundled firmware (OpenSBI and
 /// U-Boot). `--config vm.toml` reads options from a file (command-line options win).
-/// `rust-v image --help` lists the disk image tools.
+/// `rust-v image --help` lists the disk image tools; `rust-v ubuntu` downloads Ubuntu Server
+/// (once) and boots it.
 #[derive(Parser)]
 #[command(version, about, args_override_self = true)]
 struct Args {
@@ -247,6 +249,11 @@ fn open_disk(spec: &str) -> Result<rv_machine::Drive, String> {
         .write(!read_only && !snapshot)
         .open(path)
         .map_err(|e| format!("{path}: {e}"))?;
+    // A disk written to is this machine's alone; one only read can be shared with other readers.
+    let locked = if read_only || snapshot { file.try_lock_shared() } else { file.try_lock() };
+    if let Err(std::fs::TryLockError::WouldBlock) = locked {
+        return Err(format!("{path} is in use by another program (another rust-v?)"));
+    }
     let file = rv_machine::virtio::blk::FileBackend::new(file).map_err(|e| format!("{path}: {e}"))?;
     let backend: Box<dyn rv_machine::virtio::blk::Backend> = if snapshot {
         Box::new(rv_machine::virtio::blk::Overlay::new(Box::new(file)))
@@ -441,7 +448,18 @@ fn run(args: Args) -> Result<Shutdown, String> {
 }
 
 fn main() -> ExitCode {
-    let argv: Vec<String> = std::env::args().collect();
+    let mut argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("ubuntu") {
+        argv = match ubuntu::prepare(
+            std::iter::once("rust-v ubuntu".to_string()).chain(argv.into_iter().skip(2)),
+        ) {
+            Ok(argv) => argv,
+            Err(e) => {
+                eprintln!("rust-v: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+    }
     if argv.get(1).map(String::as_str) == Some("image") {
         return match image::main(std::iter::once("rust-v image".to_string()).chain(argv.into_iter().skip(2)))
         {
