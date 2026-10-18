@@ -6,6 +6,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 mod audio;
+mod clipboard;
 mod config;
 mod gui;
 mod image;
@@ -87,6 +88,10 @@ struct Args {
     /// Do not add a sound card (one is added along with a display).
     #[arg(long)]
     no_sound: bool,
+    /// Do not share the clipboard with the guest (it is shared along with a display, through
+    /// the SPICE agent, spice-vdagent, which Ubuntu Desktop includes).
+    #[arg(long)]
+    no_clipboard: bool,
     /// Share a host directory with the guest over virtio-9p (repeatable). Mount it in the
     /// guest with `mount -t 9p -o trans=virtio,version=9p2000.L TAG /mnt`. Options: tag=NAME
     /// (default share0, share1, ...), ro, uid=N and gid=N (owner shown in the guest, 1000).
@@ -324,6 +329,7 @@ fn run(args: Args) -> Result<Shutdown, String> {
             .then(|| rv_machine::display::Display::new(args.resolution.0, args.resolution.1)),
         virgl: args.gpu == "virgl",
         sound: args.display != "none" && !args.no_sound,
+        clipboard: args.display != "none" && !args.no_clipboard,
         shares: args.share.iter().enumerate().map(|(i, s)| parse_share(i, s)).collect::<Result<_, _>>()?,
     };
     if let (Some(display), Some(path)) = (&config.display, &args.screenshot) {
@@ -343,6 +349,12 @@ fn run(args: Args) -> Result<Shutdown, String> {
         }
         other => other.and_then(Result::ok),
     };
+
+    if let Some((handle, guest_text)) = machine.clipboard.take()
+        && let Err(e) = clipboard::start(handle, guest_text)
+    {
+        eprintln!("rust-v: clipboard not shared: {e}");
+    }
 
     let interactive = std::io::stdin().is_terminal();
     let _raw = if interactive { RawTerminal::enable() } else { None };

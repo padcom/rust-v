@@ -13,11 +13,14 @@ cpal = { version = "0.18.2", optional = true }
 softbuffer = "0.4.8"
 toml = "1.1.8"
 winit = "0.30"
+arboard = { version = "3.7.0", default-features = false, optional = true }
 
 [features]
-default = ["audio"]
+default = ["audio", "clipboard"]
 # Plays the guest's sound through the host (needs ALSA development files on Linux).
 audio = ["dep:cpal"]
+# Shares the clipboard with the guest's SPICE agent.
+clipboard = ["dep:arboard"]
 
 [lints]
 workspace = true

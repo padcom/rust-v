@@ -1,6 +1,7 @@
 //! Virtio 1.x devices behind the modern virtio-pci transport.
 
 pub mod blk;
+pub mod console;
 pub mod gpu;
 pub mod input;
 pub mod net;
@@ -9,6 +10,7 @@ pub mod pci;
 pub mod queue;
 pub mod rng;
 pub mod snd;
+pub mod vdagent;
 pub mod virgl;
 
 use std::sync::{Arc, Mutex};

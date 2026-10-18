@@ -107,6 +107,8 @@ pub struct MachineConfig {
     pub sound: bool,
     /// Host directories shared with the guest over virtio-9p.
     pub shares: Vec<Share>,
+    /// Add a virtio-console port for the guest's SPICE agent, sharing the clipboard.
+    pub clipboard: bool,
 }
 
 /// A host directory shared with the guest (mount tag `tag`).
@@ -148,6 +150,7 @@ impl Default for MachineConfig {
             virgl: false,
             sound: false,
             shares: Vec::new(),
+            clipboard: false,
         }
     }
 }
@@ -165,6 +168,8 @@ pub struct Machine {
     pub tablet: Option<virtio::input::InputHandle>,
     /// Where the sound device's playback goes, when there is one.
     pub audio: Option<Arc<virtio::snd::AudioRing>>,
+    /// Clipboard sharing, when enabled: the host's side, and the guest's copied text.
+    pub clipboard: Option<(virtio::console::ClipboardHandle, std::sync::mpsc::Receiver<String>)>,
     /// Host addresses of the network's TCP forwards, in configuration order.
     pub forwarded: Vec<std::net::SocketAddr>,
     pub power: Arc<power::PowerState>,
@@ -313,6 +318,13 @@ impl Machine {
         if config.rng {
             virtio_devices.push(Box::new(virtio::rng::Rng::default()));
         }
+        let mut clipboard = None;
+        if config.clipboard {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (dev, handle) = virtio::console::Console::new(tx);
+            clipboard = Some((handle, rx));
+            virtio_devices.push(Box::new(dev));
+        }
         let device_types: Vec<String> = virtio_devices.iter().map(|d| d.device_type().to_string()).collect();
         let fingerprint = format!(
             "ram={ram_size} harts={num_harts} vlen={} satp={} devices={}",
@@ -439,6 +451,7 @@ impl Machine {
             keyboard,
             tablet,
             audio,
+            clipboard,
             forwarded,
             power,
             dtb,

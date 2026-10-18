@@ -92,6 +92,7 @@ with a serial console added and takes screenshots.
 | `--resolution 1920x1080` | initial display size (the guest is offered the window size after resizing) |
 | `--screenshot shot.png` | save the display every two seconds while it changes |
 | `--no-sound` | no sound card (one comes with a display) |
+| `--no-clipboard` | do not share the clipboard (it is shared along with a display) |
 | `--gpu 2d\|virgl` | software rendering in the guest (default), or OpenGL accelerated on the host |
 
 ### 3D acceleration
@@ -109,6 +110,19 @@ the emulated CPU. virglrenderer is loaded when the option is used, so it is only
 
 `RUST_V_VIRGL=/path/to/libvirglrenderer` picks a specific build. Snapshots are not available
 with `--gpu virgl` (the GPU's state lives in the host's OpenGL).
+
+What it buys today (see [docs/performance.md](docs/performance.md)): OpenGL programs run at
+host speed (kmscube 29 → 60 fps, the vsync limit) and GNOME Shell needs about a third less
+CPU, but booting and Firefox take as long as with `2d`, since their time goes elsewhere. On
+macOS the guest gets OpenGL ES 3.0 only (Apple's OpenGL stops at 4.1), and snaps that bring
+their own Mesa may draw incompletely: the live ISO's installer window shows no text.
+
+### Clipboard
+
+With a display, text copied in the guest can be pasted on the host and the other way round.
+The guest side is the SPICE agent (`spice-vdagent`, included in Ubuntu Desktop; on other
+systems install it), which finds rust-v on a virtio-serial port named `com.redhat.spice.0`.
+`--no-clipboard` turns it off.
 
 ## Shared folders, snapshots, configuration
 
